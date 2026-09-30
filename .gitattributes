@@ -1,0 +1,46 @@
+# 统一换行符与文本属性，避免 Git 反复提示 CRLF/LF 转换。
+#
+# ⚠ `.ps1` 必须带 **UTF-8 BOM**（`tools/lint_patch.py` 的断言 J），否则
+#   Windows PowerShell 5.1 把中文注释按 GBK 解码 ⇒ 语法错误 ⇒ 安装脚本整个不执行
+#   （表现是「装了但游戏里还是老代码」，极难往编码上想）。
+#
+#   BOM 是**文件内容**，不受换行符归一化影响：已在临时仓库里做过对照实验
+#   （同样的 .gitattributes + `core.autocrlf=true`），BOM+CRLF 与 BOM+LF 两种输入
+#   提交后 blob 与检出结果**前三字节都仍是 `EF BB BF`**。
+#   绝不可改用 `working-tree-encoding=UTF-8` —— 那个属性会在编解码时吃掉 BOM，
+#   这才是真正会破坏断言 J 的写法。
+
+* text=auto
+
+# Windows 脚本：**全 LF**。
+#
+# ⚠ 这里与维护者其它仓库（`LoveNest-a11y` / `meikong-a11y` / `refs/BelfryForAccessibility`）
+#   的写法**故意不同**：它们写的是 `text eol=crlf`，因为它们工作区里的 `.ps1`
+#   本来就是 CRLF。本仓库几个 `.ps1`（含 `install.ps1`）在工作区里是 **LF**
+#   （编辑工具写出来的），配上 `eol=crlf` 会**每次编辑都刷**
+#   「LF will be replaced by CRLF the next time Git touches it」—— 而那正是本文件
+#   要消掉的东西。写成 `eol=lf` 后：索引与工作区都是 LF，一次警告都没有，
+#   而且**完全不走转换路径**，BOM 无风险。
+#   PowerShell 5.1 与 7 都认 LF（本仓库的 `install.ps1` 一直是 LF，实机跑通过）。
+#   若你更想与其它仓库逐字一致：把这一行改成 `*.ps1 text eol=crlf`，
+#   然后 `git add --renormalize tools` + 重新检出一次（`.ps1` 会变成 CRLF，BOM 仍在）。
+*.ps1       text eol=lf
+
+# 文档与源码：仓库内、检出后都是 LF（本仓库现有文件本来就是 LF）
+*.md        text eol=lf
+*.py        text eol=lf
+*.rpy       text eol=lf
+*.txt       text eol=lf
+*.gitignore text eol=lf
+
+# 二进制（本仓库当前只分发一个第三方 DLL，其余为兜底：这些内容一律不许入库，
+# 见 .gitignore，此处只是防止它们被当成文本做换行符转换）
+*.dll       binary
+*.rpa       binary
+*.rpyc      binary
+*.zip       binary
+*.7z        binary
+*.png       binary
+*.jpg       binary
+*.webp      binary
+*.ogg       binary
