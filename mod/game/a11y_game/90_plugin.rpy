@@ -15,7 +15,7 @@ init -190 python:
     # 元信息
     A11yHost.GameName = "永恒与星辰与日常"
     A11yHost.GameVersion = "1.63"        # 依据：scripts/options.rpy 的 config.version 实查
-    A11yHost.PatchVersion = "0.0.0.9"
+    A11yHost.PatchVersion = "0.0.1.0"
 
     # 后端：空 = 自动（NVDA -> SAPI）。
     # ⚠ ZDSR（争渡）按维护者决定**不适配** —— 上游把它列为实验阶段

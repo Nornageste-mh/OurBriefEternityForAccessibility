@@ -617,9 +617,10 @@ python tools\check_boot.py        # ★ 启动证据：查「该出现的行在�
 
 ## 许可
 
-见 `mod/package/licenses/`。第三方组件只有 `nvdaControllerClient64.dll`
-（NV Access Controller Client，**LGPL-2.1**，未经修改）；本包**不含** LGPL 全文，
-只在 `licenses\README.txt` 第 2 节给出取得地址与上游源码位置。
+本补丁自身的代码与文档：**MIT**，全文见根目录 [`LICENSE`](LICENSE)。
+第三方组件另计，声明与出处见 `mod/package/licenses/` —— 其中只有
+`nvdaControllerClient64.dll`（NV Access Controller Client，**LGPL-2.1**，未经修改）；
+本包**不含** LGPL 全文，只在 `licenses\README.txt` 第 2 节给出取得地址与上游源码位置。
 
 ## 致谢
 
