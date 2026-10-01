@@ -31,6 +31,10 @@
 
 init -55 python:
 
+    #: `[选项]` 证据日志的去重标记（`(名次, 总数, 文案)`）。
+    #: 焦点跟踪每次焦点变化都会调用钩子，不去重会把日志刷满。
+    _A11Y_CHOICE_SAID_LAST = [None]
+
     #: 图片路径 -> 朗读文案。键可以写全路径 / 文件名 / 去后缀的词干。
     A11yHost.UiAltByImage = {
         # ---- 游戏内快捷菜单（对话界面常驻）----
@@ -393,10 +397,102 @@ init -55 python:
             return ""
 
 
+    def _a11y_choice_caption(n, total):
+        """选项按钮 -> 第几个选项的文案。**把已经抓到的文案接到查表这条路上。**
+
+        ── 为什么必须有这一段（实机日志确认的缺口）────────────────────────────
+        原作选项界面里，按钮是**图片按钮**（`dialog_option_bg_normal.png`），
+        可读文字 `i.caption` 是它的**兄弟节点**、不在按钮里。补丁虽然覆盖了
+        `screen choice` 并给按钮加了 `alt`，但那个覆盖**被原作版本盖掉了**
+        （排序证据见 `30_choice.rpy` 文件头），于是实机日志是：
+
+            [alt] 焦点=ImageButton 文本='未命名控件（dialog_option_bg_normal.png，ChoiceReturn）'
+
+        现在覆盖已修好（`alt` 会先命中第 ① 级）；这一段是**并列的第二条通路**：
+        万一 `alt` 那条路再次失效（例如别的 mod 又覆盖了一次界面），
+        文案仍然能从「已经抓到的这一批选项」里查到 —— 见 `30_choice.rpy` 的
+        `A11yChoice.capture` / `_caption_of`。
+
+        ── 凭什么断定「名次」与「选项顺序」一致（代码事实，不是猜）──────────
+        1. 原作 `screen_choice.rpy` 的结构是 `vbox` 里 `for i in items:`
+           —— 每个选项恰好生成**一个** frame，frame 里恰好**一个** imagebutton，
+           没有 `if` 过滤、没有额外按钮（从 `scripts.rpa` 解出来的 `.rpyc`
+           反编译逐字核对）。补丁的覆盖版结构与之逐字一致。
+        2. 三个按钮的 idle 图**完全相同**（同一张 `dialog_option_bg_normal.png`），
+           所以平台层 `_A11yOrdinals` 把它们归成**同一组**，按 `(y, x)` 排行
+           （`08_uialt.rpy:82-103` 的 `_A11yOrdinals`）；vbox 让它们 x 相同、
+           y 依次增大 ⇒ 名次就是**从上到下 = items 的顺序**。
+        3. **数量必须相等**才敢用名次：`total == len(items)` 不成立时说明这一组里
+           混进了别的控件（名次与文案之间就没有任何关系了），此时**一个字都不报**，
+           交给兜底说「选项 N」。
+           这条是抄 `10_renpy_adapter.rpy:577` 的教训原文：
+           「**凡是「按位置对上文案」的地方，都必须先断言数量相等。**」
+
+        `total` 与 `n` 由平台层给（`ctx["total"]` / `ctx["ordinal"]`，
+        `08_uialt.rpy:386` 的 `_ctx`），本函数**不自己算坐标** ——
+        坐标只该用来定先后。
+        """
+        if n is None:
+            return None
+        ch = getattr(A11yHost, "choice", None)
+        if ch is None:
+            return None
+        items = getattr(ch, "_items", None) or []
+        if total != len(items) or not (0 <= n < len(items)):
+            # 数量对不上：**宁可只说「第几个」，也不报一条可能错位的文案**。
+            # 报错文案比不报危险得多 —— 玩家会按着念出来的内容去按回车。
+            A11yHost.said("[选项] 数量对不上，不报文案: 名次=%s/%s 候选=%d" % (
+                n, total, len(items)))
+            return None
+        try:
+            cap = ch._caption_of(items[n])
+        except Exception:
+            cap = ""
+        # ⚠ 必须 `strip()` 之后再判空：`_caption_of` 对**空白串**是照原样返回的
+        #   （它只判 `v.strip()` 有没有内容，返回的是没 strip 过的原文）。
+        #   不 strip 的话，一个「只有空格」的文案会被当成有效文案念出去 ——
+        #   玩家听到的是**一声不响**，正是这次要修的毛病。（离线探针抓到的。）
+        cap = (cap or "").strip()
+        # ── 焦点兜底的整批播报 ────────────────────────────────────────────
+        # 玩家已经把焦点放到选项上了 ⇒ 这一屏确实在显示，而整批播报只能由
+        # 界面自己的 `on "show"` 触发（那条路出过事故）。这里补一次，
+        # 由 `A11yChoice.ensure_announced` 自己去重，不会念两遍。
+        try:
+            ch.ensure_announced(items)
+        except Exception:
+            A11yHost.log_exc("选项整批播报（焦点兜底）失败")
+        text = cap if cap else "选项 %d" % (n + 1)
+
+        # ── 正向证据 ──────────────────────────────────────────────────────
+        # 维护者只能靠耳朵验收，所以映射对不对必须**能从日志直接看出来**：
+        # 名次 K 查到的是哪一条、候选几个、界面是不是 choice，一行里全齐。
+        # ⚠ 「界面=choice」是**事实**而不是我写死的标签：这一段只在
+        #   `_a11y_ui_alt_for` 判定了动作类名是 `ChoiceReturn`（引擎 `menu`
+        #   语句为每个选项生成的动作）之后才会走到。
+        sig = (n, total, text)
+        if _A11Y_CHOICE_SAID_LAST[0] != sig:
+            _A11Y_CHOICE_SAID_LAST[0] = sig
+            A11yHost.said("[选项] 界面=choice 候选=%d ordinal=%s 文案='%s'" % (
+                len(items), n, text))
+        return text
+
+
     def _a11y_ui_alt_for(key, w, ctx):
         """逐作层兜底钩子。`ctx` 见契约层 `UiAltFor` 的说明。"""
         n = ctx.get("ordinal")
         total = ctx.get("total")
+
+        # ---- ★ 选项界面的按钮 ----
+        # 判据是**动作类名**：`ChoiceReturn` 是引擎 `menu` 语句为每个选项生成的
+        # 动作类（实机日志里三个选项全是它）。用类名而不是图名，是因为
+        # `dialog_option_bg_normal.png` 这张图别的界面也可能用；用类名可以保证
+        # **只**接管选项按钮，不会顺手改掉别的控件的播报。
+        try:
+            act = getattr(w, "action", None)
+            if act is not None and type(act).__name__ == "ChoiceReturn":
+                return _a11y_choice_caption(n, total)
+        except Exception:
+            A11yHost.log_exc("选项文案取用失败")
 
         # ---- 存读档的 12 个格子 ----
         # 名次 = 同图控件按 (y,x) 的次序 = 格子从左到右、从上到下的次序
@@ -409,6 +505,39 @@ init -55 python:
             if state:
                 return "存档位 %d，%s" % (slot, state)
             return "存档位 %d" % slot
+
+        # ---- 存读档格子：同一张图的**另一个按钮实例** ----
+        # ⚠ 实机日志（`a11y_speech.log`）里出现过这种相邻对照：
+        #     [alt] 焦点=ImageButton 文本='存档位 1，空'                       ← 上面那条命中
+        #     [alt] 焦点=ImageButton 文本='未命名控件（sl_data_img_bg_empty.png，SafeFileAction）'
+        #   两张同图的实例里，有一张没走到上面那条 —— 说明 `total == 12`
+        #   这个「先断言数量相等」的保险**在真实布局里会不成立**（那一组里混进了
+        #   别的控件）。**具体是哪个控件混进来的，本轮没查清**（要复现一次会话，
+        #   用 Ctrl+Shift+I 快照把 `ordinal/total` 打出来才能定论）。
+        #
+        #   但「报不出位号」不该退化成「报图片名」：玩家至少要知道自己摸到了
+        #   哪一个格子。于是这里用**动作自己带的槽位号**兜底 ——
+        #   `scripts/controls/save_compat.rpy:101-104` 实查：那个按钮的 action 是
+        #   `SafeFileAction(slot)`，而它把槽位号原样存在 `self.slot`
+        #   （`self._file_action = FileAction(slot)`）。**这是动作自己的数据，
+        #   不是从坐标猜的**，所以哪怕名次对不上也敢报。
+        #   拿不到就返回 None（继续走平台层的兜底），绝不编一个号。
+        if key == "sl_data_img_bg_empty.png":
+            slot = None
+            try:
+                act = getattr(w, "action", None)
+                s = getattr(act, "slot", None)
+                if isinstance(s, int):
+                    slot = s
+                elif isinstance(s, str) and s.isdigit():
+                    slot = int(s)
+            except Exception:
+                slot = None
+            if slot is not None:
+                state = _a11y_slot_state(slot)
+                if state:
+                    return "存档位 %d，%s" % (slot, state)
+                return "存档位 %d" % slot
 
         # ---- 音声鉴赏的曲目列表 ----
         if key == "extra_audio_list_bg_normal.png" and n is not None:

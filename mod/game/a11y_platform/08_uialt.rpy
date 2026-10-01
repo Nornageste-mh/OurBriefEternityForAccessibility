@@ -35,6 +35,10 @@
 # ── 读不到时：四级兜底，**永不静默**，但要分清两种"空" ──────────────────
 #
 #   ① `style.alt`（游戏自带或本补丁将来注入的）
+#      ⚠ 它**不是**「这个控件的名字」的同义词：引擎会把状态词
+#         `_("selected")` 追加进按钮读出来的文本里（behavior.py:1199-1205）。
+#         整串就是一个状态词的，本层当它「没名字」处理，继续往下找
+#         （实机日志里存读档界面读到过 `文本='selected'`）。
 #   ② 控件自己拼得出来的文本（`_tts_all`，textbutton 与 preference 按钮靠这条）
 #   ③ 上面那三级查表
 #   ④ 兜底标识：图片名 + 动作类名，再不行「未知控件」
@@ -64,6 +68,16 @@
 # L1 冻结层，逐作不得改写。
 
 init -45 python:
+
+    #: `style.alt` 里**只有状态、没有名字**的那几个词 —— 它们不是控件的名字，
+    #: 不该被当成名字念（见 `_real_text` 第 ① 级的说明）。
+    #:
+    #: 键是**引擎自己那个串**：`renpy/common/00accessibility.rpy:33` 的
+    #: `_("selected")`，在中文界面下会被翻译成「选定」——所以两个都收。
+    #: 这是一个「只影响一个裸状态词」的小筛子：任何一个**带名字**的 alt
+    #: （例如引擎的 `"跳过没见过的 [text] selected"`）都不在里面，一字不动。
+    _A11Y_BARE_STATE_WORDS = {"selected": True, "选定": True, "已选定": True}
+
 
     def _A11yOrdinals(entries):
         """把「同界面 + 同图」的控件按 (y, x) 排行，返回 `{id(widget): (名次, 总数)}`。
@@ -219,9 +233,22 @@ init -45 python:
                 return ""
 
             # ① 已注入 / 游戏自带的 alt
+            #
+            # ⚠ 但读到 `selected` 这种**状态词**时，它不是控件的名字（实机日志确认）。
+            #   引擎 `Button._tts_all` 在按钮用 `selected_` 前缀样式、
+            #   且 `style.alt == style._hover_alt()` 时，把 `_("selected")`
+            #   追加在**它返回的那串文本**尾巴上（behavior.py:1199-1205；
+            #   该串在 `renpy/common/00accessibility.rpy:33` 登记）。
+            #   本作那些用 `selected_idle` 的图片开关因此整串就读成 `selected`，
+            #   实机日志原文：`[alt] 焦点=ImageButton 文本='selected'`。
+            #   读屏用户听到的「selected」既不是名字也不是中文，等于什么都没说。
+            # 所以这里**只筛「整串就是一个状态词」**：名字里带状态词的
+            # （引擎那种 `"跳过没见过的 [text] selected"`）一字不动，
+            # 那类控件的状态仍由 `_state_suffix` 的「：当前」补。
+            # 筛掉之后往下走 ②③ ⇒ 图片开关拿到「加粗」这类真正的名字。
             try:
                 alt = getattr(w.style, "alt", None)
-                if alt:
+                if alt and not _A11Y_BARE_STATE_WORDS.get(str(alt).strip()):
                     return str(alt)
             except Exception:
                 pass

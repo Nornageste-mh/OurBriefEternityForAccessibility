@@ -26,6 +26,44 @@
 # （每处 3 分支，见 无障碍可行性验证.md §3.3），但都是剧情分支点，听不到
 # 就等于卡死。
 #
+# ── ⚠⚠ 覆盖**曾经整个失效**（实机日志确认，别再踩一次）─────────────────────
+#
+# 症状（维护者 `a11y_speech.log` 原文）：
+#
+#     [alt] 焦点=ImageButton 文本='未命名控件（dialog_option_bg_normal.png，ChoiceReturn）'
+#
+# 根因不是「文案取不到」，而是**下面这个 `screen choice` 从来没有生效过**：
+#
+#   · 原作自己也定义了 `screen choice` —— `scripts/screens/screen_choice.rpy`
+#     （`scripts.rpa` 里解出来的 `.rpyc` 实查：`screen choice(items)` 里
+#     `imagebutton` 只有 idle/hover/音效/`action i.action`，**没有 alt**，
+#     文字是 frame 的另一个子节点 `text i.caption`）。
+#   · 引擎按 `(priority, sort_key, fn, dn)` 给脚本文件排序
+#     （`renpy/script.py:386-413`）：松散文件走 `priority = 1`、`sort_key = 文件名`
+#     （`30_choice.rpy` -> `"3"`），`.rpa` 归档走 `priority = 1`、
+#     `sort_key = parts[1]`（`scripts/screens/screen_choice.rpyc` -> `"scripts"`）。
+#     `"3" < "scripts"` ⇒ **本文件先执行、原作后执行**（`fn` 再当次级键也翻不过来）。
+#   · 顶层 `screen` 语句被包成 `ast.Init(..., -500 + l.init_offset)`
+#     （`renpy/parser.py:1207-1222`），`l.init_offset` 默认 0
+#     （`renpy/lexer.py:669`）。**两边都是 -500**，于是后执行的原作版本覆盖本文件
+#     （`renpy/display/screen.py:252` `screens[name[0], v] = self`）。
+#
+# 后果有两层，两层都在日志里对得上：
+#   1. 原作那个 `imagebutton` 没有 `alt` ⇒ 控件播报落到四级兜底 ⇒ 玩家只听到
+#      「未命名控件（dialog_option_bg_normal.png，ChoiceReturn）」；
+#   2. 本文件 `on "show"` 的采集 + 整批播报**根本不存在于运行时** ⇒
+#      6032 行日志里 `[选项]` / 「按数字键选择」一行都没有。
+#
+# 修法：用 `init offset` 把本文件的 `screen choice` 抬到原作之后执行 ——
+#   `init offset = 10` ⇒ 该 screen 的优先级变成 `-500 + 10 = -490`，
+#   而原作仍是 `-500`。init 优先级小的先执行（`renpy/script.py:447`），
+#   所以本文件**后**注册、**我们赢**。
+#
+#   ⚠ `31_main_menu.rpy` 用的是**相反**方向的 `init offset = -10`（-510），
+#     那是故意的：本作**没有**自己的 `screen main_menu`，主菜单由引擎的
+#     `_layout/screen_main_menu.rpym` 提供，让引擎那份后注册才对（与本作
+#     画面一致）。**两个方向都是「让画面的那份赢」，不是随手写的数。**
+#
 # ── 数字键直选 ──────────────────────────────────────────────────────────────
 #
 # 对齐维护者其它无障碍仓库的约定（`CfgChoiceHotkeys`「数字键直选」，默认开）：
@@ -40,6 +78,12 @@ init -60 python:
 
         def __init__(self):
             self._items = []
+            #: 已经整批播报过的那一批（按选项文案的元组认）—— 防重复播报。
+            #: `None` 表示「当前这一屏还没念过」。
+            self._batch_key = None
+            #: 这一批是靠哪条路念出去的：`show`（界面的 `on "show"`）
+            #: 还是 `focus`（焦点兜底，见 `ensure_announced`）。给日志用。
+            self._batch_via = None
 
         # ------------------------------------------------------------ 采集
         def capture(self, items):
@@ -47,9 +91,30 @@ init -60 python:
 
             存下来是为了两件事：数字键直选要知道有几个选项、每个的 action 是什么；
             以及整批播报能一次念完（而不是被引擎逐条念一半）。
+
+            ⚠ **重入安全**：这个方法现在有**两个**调用点 —— 界面的
+            `on "show"`，以及焦点兜底 `ensure_announced()`（见那里的说明）。
+            同一批选项重复采集不做任何事，所以谁先到都不影响结果。
             """
-            self._items = list(items or [])
+            items = list(items or [])
+            key = self._key_of(items)
+            if key == self._batch_key and self._items:
+                return
+            self._items = items
+            # 换了一批（哪怕是同一批的第一次）就允许重新整批播报一次。
+            # 只在「内容变了」时清标记：同一批被采集两次不会导致念两遍。
+            self._batch_key = None
+            self._batch_via = None
             A11yHost.log("选项界面: %d 个选项" % len(self._items))
+
+        @classmethod
+        def _key_of(cls, items):
+            """这一批选项的指纹 —— 用文案序列认，不用 `id()`。
+
+            ⚠ 不能用 `id(item)`：引擎每帧都会重建 `MenuEntry` 对象，
+            `id()` 每帧都变，等于「永远是新的一批」，会把整批播报刷成复读机。
+            """
+            return tuple(cls._caption_of(it) for it in items)
 
         # ------------------------------------------------------------ 题干
         @staticmethod
@@ -82,9 +147,20 @@ init -60 python:
 
             为什么整批念、而不是等玩家用方向键一个个摸：盲人玩家到了选项处
             必须先知道**一共有几个选项、分别是什么**，否则只能在黑暗里逐个试探。
+
+            **同一批只念一次**（`_batch_key` 去重）：这个方法现在有两个调用点
+            （`on "show"` 与焦点兜底 `ensure_announced`），两个都跑到也只念一遍。
             """
+            return self._announce(question, "show")
+
+        def _announce(self, question="", via="show"):
             if not self._items:
-                return
+                return False
+            key = self._key_of(self._items)
+            if key == self._batch_key:
+                return False
+            self._batch_key = key
+            self._batch_via = via
             if not question:
                 question = self.question()
             parts = []
@@ -97,12 +173,44 @@ init -60 python:
                     parts.append("%d．%s" % (i, cap))
             parts.append("按数字键选择。")
             msg = " ".join(parts)
+            # 正向证据：整批播报**走的是哪条路**。上一轮 6032 行日志里一行
+            # 选项播报都没有，而当时无法从日志分辨「钩子没触发」还是
+            # 「触发了但没话可说」—— 这一行把两者分开。
+            A11yHost.said("[选项] 整批播报 触发=%s 候选=%d 文案='%s'" % (
+                via, len(self._items), msg[:80]))
             # 记下来供平台层压掉引擎的重复播报（见 _drop_duplicate）
             try:
                 A11yHost.rpy.note_choice_announce(msg)
             except Exception:
                 pass
             A11yHost.repeat.say(msg, interrupt=True)
+            return True
+
+        def ensure_announced(self, items):
+            """焦点兜底：**玩家已经摸到选项了，整批播报却还没念过** ⇒ 补念一次。
+
+            ⚠ 为什么需要它（不是保险起见，是被实机事故逼出来的）：
+
+            上一版整批播报只挂在界面自己的 `on "show"` 上，而
+            `31_main_menu.rpy:89` 记着一条同类事故 ——
+            `on "show"` 在**真实路径上不可靠**（那次是 `tag menu` 复用界面实例）。
+            它的教训原文是：「**一个存在的钩子不等于它会在你需要的时候被调用**」。
+
+            于是这里再加一条**一定会被走到**的路：控件钩子 `UiAltFor` ——
+            玩家能把焦点放到选项按钮上，就说明这一屏选项正在显示；而焦点
+            恰恰是这一层的生命线，它不可能不被调用。两条路共用
+            `_announce` 的去重标记，所以**不会念两遍**。
+
+            返回 `True` 表示这一批的整批播报已经念出去了。
+            """
+            if not items:
+                return False
+            self.capture(items)
+            if not self._items:
+                return False
+            if self._key_of(self._items) == self._batch_key:
+                return True
+            return self._announce(via="focus")
 
         @staticmethod
         def _caption_of(item):
@@ -149,7 +257,13 @@ init -60 python:
 
 
     def _a11y_choice_shown(items):
-        """`screen choice` 的 `on "show"` 处理：采集 + 整批播报。"""
+        """`screen choice` 的 `on "show"` 处理：采集 + 整批播报。
+
+        ⚠ 这条路**不足以单独承担**整批播报（见文件头那段：`on "show"` 在真实
+        路径上出过事故），所以还有第二条路 —— 控件钩子里的
+        `A11yChoice.ensure_announced()`（`22_uialt.rpy` 的 `_a11y_ui_alt_for`）。
+        两条路共用同一份去重标记，谁先到谁念，不会念两遍。
+        """
         try:
             A11yHost.choice.capture(items)
             A11yHost.choice.announce()
@@ -157,10 +271,19 @@ init -60 python:
             A11yHost.log_exc("选项播报失败")
 
 
+# ⚠⚠ 这一行是**覆盖能不能生效的关键**，别当成可有可无的装饰：
+#   本文件（松散文件）比 `scripts.rpa` 里的 `scripts/screens/screen_choice.rpyc`
+#   先执行，而两边注册 `screen choice` 的优先级都是默认的 `-500`
+#   ⇒ 不加这一行，原作那份会**盖掉**下面这个 screen（完整证据链见文件头）。
+#   `init offset` 是编译期指令，只影响它**下面**的语句，所以放在这里最贴近用途。
+init offset = 10
+
+
 screen choice(items):
 
     # 界面显示时：采集这一批选项，然后**整批播报**一次。
     # 用 `on "show"` 而不是 python 语句，是为了保证只在**真的显示**时做一次。
+    # （可靠性由 `ensure_announced` 兜底，见 `_a11y_choice_shown` 的说明。）
     on "show" action Function(_a11y_choice_shown, items)
 
     vbox:
