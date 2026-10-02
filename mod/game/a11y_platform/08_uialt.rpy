@@ -122,6 +122,7 @@ init -45 python:
             self._beats = 0
             self._focus_id = None      # 当前焦点的**位置键** (界面名, (x, y))
             self._focus_text = None
+            self._where_miss = 0       # 位置查不到的次数（诊断：静默事故的探针）
             self._said_last = (None, None)
 
         # ================================================================ 入口
@@ -187,7 +188,15 @@ init -45 python:
                             pos = (int(fo.x), int(fo.y))
                     except Exception:
                         pos = None
-                    self._loc[id(w)] = (screen, pos)
+                    # ★ 位置**挂在控件自己身上**，不按 `id(w)` 建字典 ——
+                    #   理由见 `_where()`：`id()` 只在本轮 interaction 内稳定，
+                    #   而本作音声界面每 0.1 秒就重建一次控件，按 id 建的字典
+                    #   在下一轮就查不到 ⇒ 那是「导航整片不朗读」那次事故的根因。
+                    try:
+                        w._a11y_where = (lambda s=screen, p=pos: (s, p))
+                        self._loc[id(w)] = (screen, pos)      # 兜底：万一挂不上
+                    except Exception:
+                        self._loc[id(w)] = (screen, pos)
                     entries.append((w, screen, pos, self._best_key(w)))
                 except Exception:
                     continue
@@ -195,6 +204,16 @@ init -45 python:
             self._ord = _A11yOrdinals([
                 (screen, key, pos[0] if pos else None, pos[1] if pos else None,
                  id(w)) for (w, screen, pos, key) in entries])
+            # ★ 名次也**挂在控件自己身上**：`_ord` 是按 `id(w)` 建的，而 `id()`
+            #   只在本轮 interaction 内稳定（读它的地方可能已经换轮了）。
+            #   名次决定「这是第几个存档位 / 第几行曲目」—— 脏了会**报错位号**，
+            #   比不报更糟（探针 `probe_ordinal.py` 防的就是这一类）。
+            #   `_ord` 保留作兜底，取法见 `_ctx`。
+            for (w, screen, pos, key) in entries:
+                try:
+                    w._a11y_ord = self._ord.get(id(w), (None, None))
+                except Exception:
+                    pass
 
             # 查不到文案的记成作业清单（那份清单就是下一轮要补的表）
             for w, screen, pos, key in entries:
@@ -206,6 +225,76 @@ init -45 python:
                     known.add(k)
             self._report()
 
+        # ======================================================= 控件定位
+        #: 「查不到位置」的哨兵。**必须与 `(None, None)` 区分开** ——
+        #: 见 `_where()` 的说明（混用会造成整片静默，那是真实发生过的事故）。
+        _NO_WHERE = object()
+
+        def _where(self, w):
+            """控件的位置键 `(界面名, (x, y))`；查不到返回 `_NO_WHERE`。
+
+            三级取法，**从「不依赖任何缓存」到「依赖缓存」**：
+
+              ① **现读焦点表现场**（`Focus.widget is w`）—— 唯一真正可靠的一级。
+                 引擎的 `focus_list` 在**每次渲染时重建**（`focus.py:88-109`
+                 `take_focuses()`），所以它永远是**本轮**的坐标，不存在过期问题；
+              ② 挂在控件身上的 `w._a11y_where`（`_scan()` 里写的）；
+              ③ 按 `id(w)` 查的字典（`_scan()` 里写的）。
+
+            ── 为什么①必须在最前，以及为什么当初那样写会整片静默 ──────────
+            实机事故（用户报「导航又不朗读了」）。引擎每轮 interaction 都会
+            **重建** screen 里的 displayable，而 `_scan()` 每 0.25 秒才跑一次，
+            两次扫描之间换过好几轮 ⇒ ②③ 都可能失配。
+
+            失配本身不致命，致命的是**它与「位置真的取不到」用同一个返回值**：
+            两者都是 `(None, None)` ⇒ 「当前焦点」与「上一个焦点」永远相等
+            ⇒ `_track_focus` 认成「同一个控件、文本没变」⇒ **一行播报都不发**。
+            实机日志原样是这个形状（焦点行在刷，`[alt] 播报:` 一行都没有，
+            反而只有几条 `[alt] 值变化:`）：
+
+                [alt] 焦点=ImageButton 文本='开始游戏' 引擎队列=0
+                [alt] 焦点=ImageButton 文本='继续游戏' 引擎队列=0
+                [alt] 焦点=ImageButton 文本='读取游戏' 引擎队列=0
+                （没有任何 [alt] 播报: 行，也没有任何 NVDA 调用）
+
+            所以这里返回**哨兵**而不是 `(None, None)`：让「查不到」彼此
+            **互不相等** ⇒ 最坏情况退化成「每次都念」（吵），而不是「全哑」。
+            **宁可吵，不可哑** —— 这就是本补丁那条「永不静默」的红线。
+            """
+            # ① 现读焦点表：与缓存无关，每轮都是最新的
+            try:
+                import renpy.display.focus as _f
+                for fo in _f.focus_list:
+                    if getattr(fo, "widget", None) is not w:
+                        continue
+                    screen = None
+                    sn = getattr(getattr(fo, "screen", None), "screen_name", None)
+                    if isinstance(sn, (tuple, list)) and sn:
+                        screen = str(sn[0])
+                    elif isinstance(sn, str) and sn:
+                        screen = sn
+                    pos = None
+                    if fo.x is not None and fo.y is not None:
+                        pos = (int(fo.x), int(fo.y))
+                    return (screen, pos)
+            except Exception:
+                pass
+            # ② 控件对象自己身上的（跨 interaction 跟着对象走）
+            try:
+                fn = getattr(w, "_a11y_where", None)
+                if fn is not None:
+                    return fn()
+            except Exception:
+                pass
+            # ③ 扫描时按 id 建的字典（最不可靠的一级）
+            try:
+                hit = self._loc.get(id(w))
+                if hit is not None:
+                    return hit
+            except Exception:
+                pass
+            return self._NO_WHERE
+
         # ======================================================= 文本解析（四级）
         def _read_text(self, w):
             """当前控件「应该被念成什么」—— 四级兜底，**永不为空**。
@@ -213,7 +302,8 @@ init -45 python:
             各级顺序的理由与「两种空」的区分见文件头。
             """
             import renpy.display.behavior as _b
-            screen, pos = self._loc.get(id(w), (None, None))
+            where = self._where(w)
+            screen, pos = (None, None) if where is self._NO_WHERE else where
 
             # ①②③：真实文本
             t = self._real_text(w, screen, pos)
@@ -316,7 +406,9 @@ init -45 python:
 
         def _has_real_text(self, w):
             try:
-                return bool(self._real_text(w, *self._loc.get(id(w), (None, None))))
+                where = self._where(w)
+                screen, pos = (None, None) if where is self._NO_WHERE else where
+                return bool(self._real_text(w, screen, pos))
             except Exception:
                 return False
 
@@ -431,8 +523,20 @@ init -45 python:
 
             `ordinal` / `total` 是**同界面同图的第几个、共几个**（按 (y, x) 排序）
             —— 逐作层要「第几个」时一律用它，不要自己算坐标（见 `_A11yOrdinals`）。
+
+            ⚠ 名次从**控件自己身上**读（`_scan` 写的 `w._a11y_ord`），
+              按 `id(w)` 查 `_ord` 只作兜底 —— 理由同 `_where()`：
+              `id()` 只在本轮 interaction 内稳定，而名次算错会**报错位号**。
             """
-            n, total = self._ord.get(id(w), (None, None))
+            n, total = (None, None)
+            try:
+                hit = getattr(w, "_a11y_ord", None)
+                if hit is not None:
+                    n, total = hit
+            except Exception:
+                pass
+            if n is None:
+                n, total = self._ord.get(id(w), (None, None))
             return {
                 "screen": screen,
                 "pos": pos,
@@ -623,8 +727,19 @@ init -45 python:
                 self._focus_text = None
                 return
             text = self._read_text(w)
-            screen, pos = self._loc.get(id(w), (None, None))
-            here = (screen, pos)
+            where = self._where(w)
+            miss = where is self._NO_WHERE
+            # 位置查不到时**不静默**：写一行，且统计前几次 —— `_where()` 的说明里
+            # 记着这类失配曾经让整片界面不朗读。留证据比留空白便宜。
+            if miss:
+                self._where_miss += 1
+                if self._where_miss <= 5:
+                    A11yHost.said("[alt] 位置查不到（第 %d 次）：%s 文本=%r" % (
+                        self._where_miss, type(w).__name__, (text or "")[:30]))
+                here = None if self._focus_id is None else (
+                    "__miss__", self._where_miss)
+            else:
+                here = where
             if here == self._focus_id:
                 if text and text != self._focus_text:
                     self._focus_text = text
@@ -656,7 +771,7 @@ init -45 python:
             ⇒ 它管了。不要改回「按时间让位」——那条判据会让本层永远让位
             （引擎一直在报别的文本），实机反馈就是「和刚才没区别」。
             """
-            my = self._focus_key(text)
+            my = self._focus_key(w, text)
             if my == self._said_last:
                 return
             self._said_last = my
@@ -669,7 +784,7 @@ init -45 python:
             A11yHost.said("[alt] 播报: " + text[:60])
             A11yHost.repeat.say(text, interrupt=True, record=False)
 
-        def _focus_key(self, text):
+        def _focus_key(self, w, text):
             """播报去重键 —— **不能用控件对象身份**（`id(w)`）。
 
             ── 为什么（实机取证：用户报「音声播放界面按方向键朗读抽搐」）──────
@@ -694,9 +809,16 @@ init -45 python:
             文本 + 界面名 + 坐标。它们对「同一个按钮」稳定，对「真的换了控件」
             不相等（换控件必然换文本或换位置），所以不会吞掉真变化。
             真正跨帧变化的内容（滑杆百分比、立绘当前值）走的是
-            `_track_focus` 里「同 id 且文本变了」那条支路，不受这里影响。
+            `_track_focus` 里「同位置且文本变了」那条支路，不受这里影响。
+
+            ⚠ 位置查不到时**不能退化成 `(None, None)`** —— 那会让所有查不到的
+            控件共用一个键，第一个念过之后其余全被去重吞掉（＝静默）。
+            位置本身的取法见 `_where()`。
             """
-            screen, pos = self._loc.get(id(w), (None, None))
+            where = self._where(w)
+            if where is self._NO_WHERE:
+                return (text, "__nopos__", id(w))
+            screen, pos = where
             return (text, screen, pos)
 
         # ============================================================ 键盘导航
