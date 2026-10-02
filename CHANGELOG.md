@@ -4,6 +4,77 @@
 "尚未查清"的东西写在 `无障碍可行性验证.md` 与 `docs/已验证版本.md` 里，
 不在这里冒充已修复。
 
+## 0.0.1.1 —— 修：音声播放界面按方向键「朗读抽搐」
+
+维护者反馈：「**在音声播放界面按下方向键导航容易触发『朗读抽搐』。**」
+
+日志里那个形状非常整齐（`a11y_speech.log`，同一句话约 **1.0 秒**一次、连续几十次）：
+
+```
+[alt] 焦点=ImageButton 文本='立绘' 引擎队列=0
+[alt] 播报: 立绘
+[A11y果] 失败 backend=NVDA text='(调用前) 立绘'      ← cancelSpeech 打断了上一句
+[A11y果] OK   backend=NVDA text='立绘'
+……（约 1.0 秒后）一模一样再一遍
+```
+
+**1.0 秒正是 `05_repeat.rpy` 的 `DEDUP_WINDOW`** ⇒ 说明去重**没生效**，
+而不是「去重窗口太短」。两个相互独立的缺陷叠在一起：
+
+### 缺陷一：去重键用了**控件对象身份**
+
+`_announce` 原本按 `(id(w), text)` 去重。而引擎的 screen 每轮 interaction 都会
+**重新构造**它的 displayable（`imagebutton`/`textbutton` 都是普通 displayable），
+本作音声播放界面又带一个**每 0.1 秒重启一次 interaction** 的 timer：
+
+```
+scripts/screens/music.rpy:336    timer 0.1:
+scripts/screens/music.rpy:337        action [SetVariable('duration', …), SetVariable('music_pos', …)]
+scripts/screens/music.rpy:338        repeat True
+```
+
+⇒ 同一个按钮每 0.1 秒换一个对象，`id(w)` 一直变，「同 id 才算同一个控件」永远不成立。
+**修**：去重键改成与对象身份无关的 **（文本 + 界面名 + 坐标）**（`_focus_key`）。
+同理，`_track_focus` 里「同一个控件文本变了 ⇒ 念值变化」的判据也从 `id(w)`
+改成**位置键** —— 否则滑杆百分比与「立绘当前值」这类真·值变化永远不会被念
+（它们也会被当成「新控件」而走进重复播报那条路）。
+
+### 缺陷二：「只有状态、没有名字」的文本被当成了名字
+
+音声曲目列表用 `selected_idle`（三张状态图），命中的是引擎这两行：
+
+```
+renpy/display/behavior.py:1202    if self.style.prefix.startswith("selected_") and (self.style.alt == self.style._hover_alt()):
+renpy/display/behavior.py:1203        rv += " selected" if raw else " " + renpy.minstore.__("selected")
+```
+
+于是**整串**就是一个 `selected` —— 那不是控件的名字。原先只有第 ① 级
+（`style.alt`）过了状态词筛子，**第 ② 级 `_tts_all` 没过**，而引擎恰恰是在
+第 ② 级把状态词追加回去的 ⇒ 同一个 `selected` 原样返回，**第 ③ 级查表永远走不到**，
+曲目名的位置就一直念 `selected`。**这正是「只筛一层」= 假修复**：
+筛掉之后流程往下走，又被下一级原样交回来。
+
+**修**：筛子做成 `_drop_bare_state()`，**① 与 ② 都过**；筛空之后**不 return**，
+继续走 ③ 查表（那一级才有「音声 05 主题曲 永恒星辰下的日常」这种真名字）。
+两种情形分开处理：整串就是状态词 ⇒ 判空；名字 + 空白 + 状态词 ⇒ 只砍尾巴
+（引擎的 `"跳过没见过的 [text] selected"` 属这类，名字不能丢）。
+
+### 新增的机器证据
+
+- `tools/probe_state_word.py` —— 从 `08_uialt.rpy` **抽真源码**来跑（同
+  `probe_ordinal.py` 的做法），喂进去的是**引擎判据复刻出来的串**：
+  裸 `selected`（实机那一串）必须判空；名字 + 状态词只砍尾巴；
+  `selected files` / `selectedness` / `我的selected` 一字不动；
+  中文界面的「选定 / 已选定」同样处理；最后一条是**假修复回归**——
+  断言「只筛 ① 的旧写法会把 `selected` 从 ② 带回来」。
+
+### 仍未查清（不许写成已修复）
+
+- 这一版修的是**重复播报**这条通路。若维护者耳测后仍听到抽搐，下一个怀疑对象是
+  `_announce` 里**每次播报都传 `interrupt=True`**（即每句话都先 `cancelSpeech()`）——
+  那属于「打断策略」而不是「去重」，改法完全不同（走 `INTERRUPT_AFTER` 的排队降级）。
+  没有实机日志之前**不预先改**：两者听感相近，但改错了会引入「菜单播报被吞」。
+
 ## 0.0.1.0 —— 修：选项读不出来（`screen choice` 覆盖从未生效）
 
 维护者反馈：「**选项读不出来，都是未知控件+ID。**」

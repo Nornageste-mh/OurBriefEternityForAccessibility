@@ -120,7 +120,7 @@ init -45 python:
             self._unknown = {}    # 界面 -> set(查不到文案的键)，作业清单
             self._reported = {}   # 去重：同一份清单只写一次日志
             self._beats = 0
-            self._focus_id = None
+            self._focus_id = None      # 当前焦点的**位置键** (界面名, (x, y))
             self._focus_text = None
             self._said_last = (None, None)
 
@@ -224,6 +224,35 @@ init -45 python:
                 return ""
             return self._fallback_label(w) or "未知控件"
 
+        @staticmethod
+        def _drop_bare_state(t):
+            """把**只有一个状态词**的文本判成空串；名字里的状态词照留。
+
+            ⚠ 这一条必须同时管住 ① 和 ② —— 只筛 ① 是**假的修复**：
+              `style.alt` 被筛掉之后流程落进 ② `_tts_all`，而引擎正是在
+              `_tts_all` 里把状态词追加回去的（behavior.py:1199-1205），
+              于是同一个 `selected` 又原样返回，查表那一级永远走不到。
+              实机证据（用户 a11y_speech.log，音声播放界面）：
+                  [alt] 焦点=ImageButton 文本='selected'
+              而不是本该出现的「音声 05 主题曲 永恒星辰下的日常」。
+
+            两种情形分开处理：
+              · 整串就是一个状态词            -> 返回 ""，继续往下找名字（③ 查表）
+              · 名字 + 空白 + 状态词          -> 只砍掉尾巴，名字留下
+                （引擎的 `"跳过没见过的 [text] selected"` 属于这一类，名字不能丢）
+            """
+            s = (t or "").strip()
+            if not s:
+                return ""
+            if _A11Y_BARE_STATE_WORDS.get(s):
+                return ""
+            for w in _A11Y_BARE_STATE_WORDS:
+                if s.endswith(w) and len(s) > len(w):
+                    head = s[: -len(w)]
+                    if head != head.rstrip():        # 状态词前必须有空白
+                        return head.strip()
+            return s
+
         def _real_text(self, w, screen=None, pos=None):
             """①②③ 三级「真实文本」；都取不到返回空串。"""
             import renpy.display.behavior as _b
@@ -242,20 +271,34 @@ init -45 python:
             #   本作那些用 `selected_idle` 的图片开关因此整串就读成 `selected`，
             #   实机日志原文：`[alt] 焦点=ImageButton 文本='selected'`。
             #   读屏用户听到的「selected」既不是名字也不是中文，等于什么都没说。
-            # 所以这里**只筛「整串就是一个状态词」**：名字里带状态词的
-            # （引擎那种 `"跳过没见过的 [text] selected"`）一字不动，
-            # 那类控件的状态仍由 `_state_suffix` 的「：当前」补。
-            # 筛掉之后往下走 ②③ ⇒ 图片开关拿到「加粗」这类真正的名字。
+            #
+            # ⚠⚠ **① 和 ② 都要过筛子**（`_drop_bare_state`），只筛 ① 是假修复：
+            #   ① 筛掉之后流程落进 ②，而引擎恰恰是在 ② 里把状态词追加回去的
+            #   —— 同一个 `selected` 原样返回，③ 查表永远走不到。
+            #   实机症状（用户报「音声播放界面按方向键朗读抽搐」）：曲目名的位置
+            #   反复念出 `selected`。修好后这里应读到曲目名。
+            #
+            #   两种情形分开处理：整串就是状态词 -> 判空、继续往下找名字；
+            #   名字 + 空白 + 状态词 -> 只砍尾巴（引擎那种
+            #   `"跳过没见过的 [text] selected"` 名字不能丢，状态另有
+            #   `_state_suffix` 的「：当前」补）。
             try:
                 alt = getattr(w.style, "alt", None)
-                if alt and not _A11Y_BARE_STATE_WORDS.get(str(alt).strip()):
-                    return str(alt)
+                if alt:
+                    alt = self._drop_bare_state(alt)
+                    if alt:
+                        return alt
             except Exception:
                 pass
 
             # ② 控件自己拼得出来的文本
+            #
+            # ⚠ 同样要过一遍状态词筛子：引擎在 `_tts_all` 尾巴上追加
+            #   `_("selected")`（behavior.py:1199-1205），所以图片开关在这里
+            #   整串读成 `selected`。筛空之后**不要 return**，让它继续走 ③ 查表
+            #   —— 那一级才有名字（`extra_audio_list_bg_normal.png` -> 曲目名）。
             try:
-                t = str(w._tts_all(raw=True)).strip()
+                t = self._drop_bare_state(w._tts_all(raw=True))
                 if t:
                     return t
             except Exception:
@@ -562,7 +605,16 @@ init -45 python:
 
         # ================================================================ 播报
         def _track_focus(self):
-            """焦点变化 -> 念新控件；同一控件文本变了 -> 也念（滑杆靠这条）。"""
+            """焦点变化 -> 念新控件；同一控件文本变了 -> 也念（滑杆靠这条）。
+
+            ⚠ 「同一个控件」的判据是**位置键**，不是对象身份 `id(w)`：本作音声
+            播放界面有个 0.1 秒的 timer（music.rpy:336），每 0.1 秒重启一次
+            interaction ⇒ 同一个按钮每 0.1 秒换一个对象。用 `id(w)` 时
+            「同 id 且文本变了」这条支路**永远不会成立**，于是滑杆的百分比
+            与「立绘当前值」这类**真·值变化**会被当成新控件的重复播报。
+            换成位置键后：位置没动 = 还是那个控件（比文本），位置动了 = 换了控件。
+            详见 `_focus_key` 的实机取证。
+            """
             import renpy.display.focus as _f
             import renpy.display.behavior as _b
             w = _f.get_focused()
@@ -571,14 +623,16 @@ init -45 python:
                 self._focus_text = None
                 return
             text = self._read_text(w)
-            if id(w) == self._focus_id:
+            screen, pos = self._loc.get(id(w), (None, None))
+            here = (screen, pos)
+            if here == self._focus_id:
                 if text and text != self._focus_text:
                     self._focus_text = text
                     A11yHost.said("[alt] 值变化: " + text[:60])
                     A11yHost.repeat.say(text, interrupt=True, record=False)
                 return
 
-            self._focus_id = id(w)
+            self._focus_id = here
             self._focus_text = text
             try:
                 import renpy.display.tts as _t
@@ -602,7 +656,7 @@ init -45 python:
             ⇒ 它管了。不要改回「按时间让位」——那条判据会让本层永远让位
             （引擎一直在报别的文本），实机反馈就是「和刚才没区别」。
             """
-            my = (id(w), text)
+            my = self._focus_key(text)
             if my == self._said_last:
                 return
             self._said_last = my
@@ -614,6 +668,36 @@ init -45 python:
                 return
             A11yHost.said("[alt] 播报: " + text[:60])
             A11yHost.repeat.say(text, interrupt=True, record=False)
+
+        def _focus_key(self, text):
+            """播报去重键 —— **不能用控件对象身份**（`id(w)`）。
+
+            ── 为什么（实机取证：用户报「音声播放界面按方向键朗读抽搐」）──────
+            引擎的 screen 每轮 interaction 都会**重新构造**它的 displayable
+            （`imagebutton` / `textbutton` 都是普通 displayable，不跨 interaction
+            复用；只有 `use`/screen 对象本身被缓存）。而本作音声播放界面带
+
+                music.rpy:336    timer 0.1: action [SetVariable(...), ...] repeat True
+
+            这种 timer 会**每 0.1 秒重启一次 interaction** —— 于是同一个按钮
+            每 0.1 秒换一个对象：`id(w)` 一直变，「同 id 才算同一个控件」的去重
+            永远不成立，而重读层那条 `DEDUP_WINDOW = 1.0` 一到期就再念一遍。
+            实机日志原样是这个形状（同一句话，约 1 秒一次，连续几十次）：
+
+                [alt] 焦点=ImageButton 文本='立绘' 引擎队列=0
+                [alt] 播报: 立绘
+                ……（约 1.0 秒后）一模一样再一遍
+
+            听感就是「按住方向键 → 同一句抽搐式地反复念」。
+
+            ── 所以键取**与对象身份无关**的三样东西 ────────────────────────
+            文本 + 界面名 + 坐标。它们对「同一个按钮」稳定，对「真的换了控件」
+            不相等（换控件必然换文本或换位置），所以不会吞掉真变化。
+            真正跨帧变化的内容（滑杆百分比、立绘当前值）走的是
+            `_track_focus` 里「同 id 且文本变了」那条支路，不受这里影响。
+            """
+            screen, pos = self._loc.get(id(w), (None, None))
+            return (text, screen, pos)
 
         # ============================================================ 键盘导航
         def nav_candidates(self):
