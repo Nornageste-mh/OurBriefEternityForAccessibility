@@ -4,6 +4,46 @@
 "尚未查清"的东西写在 `无障碍可行性验证.md` 与 `docs/已验证版本.md` 里，
 不在这里冒充已修复。
 
+## 0.0.1.3 —— 修：滑杆念成 `Barbar` / `asmr volumebar`
+
+`0.0.1.2` 装好后**我自己先跑了一次游戏**（不再只靠断言），实机日志里
+导航与曲目名都正常了，但滑杆露出两个之前被「整片静默」盖住的小毛病：
+
+```
+[alt] 焦点=Bar 文本='Barbar'              ← 播放进度滑杆
+[alt] 焦点=Bar 文本='asmr volumebar'      ← 音声音量滑杆
+```
+
+根因是**引擎把玩家可读的名字放在 `value.alt` 上，而不是 `name` 上**：
+
+- `Bar._tts_all` 拼的是 `value.alt` + 一个「栏」字（`behavior.py:2664-2671`）；
+- `BarValue.alt` 的默认值是 `"Bar"`（`renpy/ui.py:74`）⇒ 本作自定义的
+  `MyAudioPositionValue` 没填 alt，于是整串是 `Bar` + `bar` = **`Barbar`**；
+- `Preference("mixer asmr volume")` 会把 `value.alt` 填成 `"asmr volume"`
+  （`00preferences.rpy:646`），**而它用的是 `MixerValue`，根本没有 `name` 属性**
+  ⇒ 补丁只找 `name` 一无所获，最后念出内部标识 `asmr volume` + `bar`。
+
+而补丁自己的 `_bar_text` 原先只找 `name` / `preference` / `variable`，**漏了 `alt`**。
+
+### 修法
+
+- `_bar_text` 的名字改为**先看 `value.alt`** 再退回内部标识，并新增兜底：
+  **绝不把引擎那个空泛的默认 `"Bar"` 念给玩家**；
+- 逐作层补两条：偏好表加 `"asmr volume": "音声音量"`
+  （键用**引擎拼出来的那个串**，不是内部 mixer 名 `asmr`）；
+  位置表加音声页两根滑杆 —— 播放进度那根**只能**走位置表，
+  因为它既不填 alt、也没有任何可读名，**位置是它唯一的身份**。
+
+### 实机取证（本次是我自己跑的，不是等维护者）
+
+```
+[A11y读] 永恒与星辰与日常无障碍补丁 0.0.1.2 已加载。朗读后端：NVDA。
+[A11y读] [alt] 焦点=ImageButton 文本='开始游戏'   → [alt] 播报: 开始游戏
+[A11y读] [alt] 焦点=ImageButton 文本='音声 02 小小作家的休闲时刻' → 播报（不再念 selected）
+```
+
+全程 **没有一行** `[alt] 位置查不到（第 N 次）` ⇒ `_where()` 的①（现读焦点表）生效。
+
 ## 0.0.1.2 —— 修 0.0.1.1 引入的回归：**导航整片不朗读**
 
 维护者反馈：「**怎么又写出回归 BUG 了？导航又不朗读了。**」

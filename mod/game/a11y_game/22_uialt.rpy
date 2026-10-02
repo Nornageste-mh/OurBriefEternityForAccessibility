@@ -182,6 +182,11 @@ init -55 python:
         "persistent.normal_text_cps": "文本显示速度",
         "persistent.afm_text_cps": "自动模式时的文本显示速度",
         "persistent.text_box_opacity": "文本框透明度",
+        # 音声鉴赏页的音量滑杆：源码是 `value Preference("mixer asmr volume")`
+        # （`scripts/screens/music.rpy:439`），引擎据此把 `value.alt` 填成
+        # `"asmr volume"`（`renpy/common/00preferences.rpy:646`）——
+        # 键要用**引擎拼出来的那个串**，不是内部 mixer 名 `asmr`。
+        "asmr volume": "音声音量",
     }
 
     #: ★ **位置表**：`{("界面名", x, y): "文案"}`。
@@ -272,6 +277,13 @@ init -55 python:
         # 滑杆
         ("setting_sound", 400, 1163): "时语语音音量",
         ("setting_sound", 1420, 1163): "星弥语音音量",
+        # 音声鉴赏页（`screen music`）的两根滑杆。坐标取自源码字面常量
+        # （`scripts/screens/music.rpy:424-447`）。播放进度那根**只能**走位置表：
+        # 它的值是本作自定义的 `MyAudioPositionValue`，既不填 `value.alt`
+        # （于是引擎按 `BarValue.alt` 默认值念成 `Barbar`，`renpy/ui.py:74`），
+        # 也没有任何可读名 —— 位置是它唯一的身份。
+        ("music", 1209, 1093): "播放进度",        # bar MyAudioPositionValue
+        ("music", 2062, 1095): "音声音量",        # bar Preference("mixer asmr volume")
     }
 
 

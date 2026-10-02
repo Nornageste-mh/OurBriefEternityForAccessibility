@@ -549,34 +549,62 @@ init -45 python:
         def _bar_text(self, w, screen=None, pos=None):
             """滑杆的「名字 + 当前百分比」。
 
-            为什么不由引擎念：`Bar._tts_all` 尾巴上硬编码一个「栏」字
-            （behavior.py:2664-2671），补丁改不掉，所以自己念。
+            为什么不由引擎念：`Bar._tts_all` 拼的是 **`value.alt` + 一个「栏」字**
+            （behavior.py:2664-2671），补丁改不掉那个字；而 `BarValue.alt` 的默认值
+            是 `"Bar"`（ui.py:74）⇒ 引擎把它念成 `Barbar`。所以自己念。
 
-            名字三级取：preference 名 -> 位置表 -> 只报数值。
+            ⚠ 名字的第一来源是 **`value.alt`**，不是 `name`：
+              引擎把**玩家可读的名字**放在 `value.alt` 上，而 `name` 是内部标识。
+              `Preference("mixer asmr volume")` 的结果里
+              —— `value.alt == "asmr volume"`（引擎自己拼的，00preferences.rpy:646）、
+              `value.mixer == "asmr"`（内部标识）—— 而 `MixerValue` **没有** `name`
+              属性，所以只找 `name` 会一无所获、最后念成内部标识。
+              实机取证：音声界面的音量滑杆被念成 `asmr volumebar`。
+
+            名字取法（依次）：① `value.alt` 查 preference 表 → ② `name` 查偏好表
+            → ③ 位置表 → ④ 类名兜底（`ScrollValue` → 「滚动条」；中文/带空格的内部名
+            原样报，便于维护者补表；其余报「数值」）。
             **没登记的内部名不念给玩家听**（会变成「history_list 45%」那种）。
             """
             val = getattr(w, "value", None)
             if val is None:
                 return None
-            name = None
-            for attr in ("name", "preference", "variable"):
-                v = getattr(val, attr, None)
-                if isinstance(v, str) and v:
-                    name = v
-                    break
-            label = None
             tbl = A11yHost.UiAltByPreference or {}
-            if name:
-                label = tbl.get(name) or tbl.get(name.lower())
+            label = None
+            name = None
+
+            # ① 引擎放在 value 上的可读名（`Preference(...)` 会填它）
+            alt = getattr(val, "alt", None)
+            if isinstance(alt, str) and alt.strip():
+                alt = alt.strip()
+                label = tbl.get(alt) or tbl.get(alt.lower())
+
+            # ② 内部标识（`name` / `preference` / `variable`）
+            if label is None:
+                for attr in ("name", "preference", "variable"):
+                    v = getattr(val, attr, None)
+                    if isinstance(v, str) and v:
+                        name = v
+                        break
+                if name:
+                    label = tbl.get(name) or tbl.get(name.lower())
+
+            # ③ 位置表
             if label is None:
                 ptbl = A11yHost.UiAltByPos or {}
                 if screen and pos:
                     label = ptbl.get((screen, pos[0], pos[1]))
-            if label is None and name:
+
+            # ④ 兜底：绝不把引擎那个空泛的默认 `"Bar"` 念给玩家
+            if label is None:
                 cls = type(val).__name__
                 if "ScrollValue" in cls:
                     label = "滚动条"
-                elif (" " in name) or any("\u4e00" <= c <= "\u9fff" for c in name):
+                elif isinstance(alt, str) and alt.strip() and alt.strip() != "Bar" \
+                        and alt.strip() not in tbl:
+                    label = alt.strip()          # 引擎给的可读名，原样用
+                elif name and ((" " in name) or any(
+                        "\u4e00" <= c <= "\u9fff" for c in name)):
                     label = name
                 else:
                     label = "数值"
