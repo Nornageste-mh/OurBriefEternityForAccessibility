@@ -410,15 +410,36 @@ init -45 python:
             #   `_("selected")`（behavior.py:1199-1205），所以图片开关在这里
             #   整串读成 `selected`。筛空之后**不要 return**，让它继续走 ③ 查表
             #   —— 那一级才有名字（`extra_audio_list_bg_normal.png` -> 曲目名）。
-            try:
-                t = self._drop_bare_state(w._tts_all(raw=True))
-                if t:
-                    return t
-            except Exception:
-                pass
+            #
+            # ⚠⚠ **Bar 必须跳过这一级**（实机事故：滑杆念成 `Barbar`）：
+            #   `Bar._tts_all` 拼的是 `value.alt` + 一个「栏」字
+            #   （behavior.py:2664-2671），而 `BarValue.alt` 默认就是 `"Bar"`
+            #   （ui.py:74）⇒ 本作自定义的 `MyAudioPositionValue` 整串读成 `Barbar`。
+            #   它**永远非空**，所以只要让它走到这一级，第 ③ 级（`_bar_text`
+            #   —— 补丁专门为滑杆写的那一段）就永远轮不到。
+            #   补丁对滑杆的立场是明确的：**不由引擎念，由补丁念**
+            #   （文件头「引擎事实」里写着那条硬编码的「栏」字），所以这里是
+            #   **有意覆盖**引擎，不是漏掉它。
+            if not isinstance(w, _b.Bar):
+                try:
+                    t = self._drop_bare_state(w._tts_all(raw=True))
+                    if t:
+                        return t
+                except Exception:
+                    pass
 
             # ③ 查表
-            if isinstance(w, _b.Button):
+            #
+            # ⚠ **Bar 也必须进来**（实机事故：滑杆念成 `Barbar` / `asmr volumebar`）。
+            #   这里原来只放 `_b.Button`，而 `Bar` 不是 `Button` ⇒ **整段被跳过**，
+            #   滑杆永远走不到查表、直接落到 ② 的引擎 `_tts_all`，念出
+            #   `value.alt` + 「栏」字（`MyAudioPositionValue` 没填 alt，于是
+            #   默认值 `"Bar"` + `bar` = `Barbar`）。
+            #   更贵的一课：`_table_text` 里**本来就有** Bar 分支
+            #   （`isinstance(w, _b.Bar) -> _bar_text`），上一版我还在里面
+            #   认真修了名字取法 —— **改的是一个走不到的函数**。
+            #   「函数改对了」不等于「它会被调用」：门口那道类型判据也属于被改的一部分。
+            if isinstance(w, (_b.Button, _b.Bar)):
                 try:
                     txt = self._table_text(w, screen, pos)
                     if txt:
@@ -631,19 +652,89 @@ init -45 python:
                     label = name
                 else:
                     label = "数值"
-            pct = None
-            try:
-                adj = val.get_adjustment()
-                lo, hi, v = float(adj.min), float(adj.max), float(adj.value)
-                if hi > lo:
-                    pct = int(round((v - lo) * 100.0 / (hi - lo)))
-            except Exception:
-                pct = None
+            pct = self._bar_pct(val)
             if label is None and pct is None:
                 return None
             if label is None:
                 label = "数值"
             return label if pct is None else "%s %d%%" % (label, pct)
+
+        @staticmethod
+        def _bar_pct(val):
+            """滑杆当前位置的百分比；取不到返回 `None`（绝不猜成 0）。
+
+            三条取法，按「这个值对象最可能怎么表示自己」排序 —— 全部来自**实机探针
+            打出来的接口**，不是猜的（探针原文见 CHANGELOG 0.0.1.5）：
+
+              1. **`get_pos_duration()` -> `(位置, 总长)`**：本作那根**播放进度**滑杆
+                 用的自定义值对象走这条（它是逐作自己写的，`get_adjustment()`
+                 虽然能调通，但返回的 `Adjustment` **没有 min/max**、`value` 是
+                 **秒数** ⇒ 想按 min/max 算百分比**必然失败**，名字后面永远光秃秃）。
+                 ⚠ 平台层不写那一类的名字（断言 B）：靠**鸭子类型**认它。
+              2. **`adjustment` 的 min/max/value**：普通 `StaticValue`/范围滑杆走这条。
+              3. **`get_volume()`**：`MixerValue`（音量滑杆）走这条，返回 0~1。
+
+            三条都不成立时返回 `None`：**名字仍然照念，绝不编一个数值出来。**
+            """
+            # 1) 位置 / 总长（播放进度那类）
+            fn = getattr(val, "get_pos_duration", None)
+            if callable(fn):
+                try:
+                    d = fn()
+                    if isinstance(d, (tuple, list)) and len(d) >= 2:
+                        cur, total = float(d[0]), float(d[1])
+                        if total > 0:
+                            return max(0, min(100, int(round(cur * 100.0 / total))))
+                except Exception:
+                    pass
+            # 2) 带范围的 adjustment
+            adj = None
+            try:
+                adj = val.get_adjustment()
+            except Exception:
+                adj = None
+            if adj is None:
+                adj = getattr(val, "adjustment", None)
+            if adj is not None:
+                try:
+                    lo = getattr(adj, "min", None)
+                    hi = getattr(adj, "max", None)
+                    if lo is not None and hi is not None and float(hi) > float(lo):
+                        return int(round((float(adj.value) - float(lo)) * 100.0
+                                         / (float(hi) - float(lo))))
+                except Exception:
+                    pass
+            # 3) 混音器音量（音量滑杆那类）
+            gv = getattr(val, "get_volume", None)
+            if callable(gv):
+                try:
+                    v = float(gv())
+                    return max(0, min(100, int(round(v * 100.0))))
+                except Exception:
+                    pass
+            return None
+
+        def _bar_named(self, w, name):
+            """滑杆**有名字**时的播报：`名字 + 当前百分比`（拼接的唯一出口）。
+
+            ── 为什么要有这个函数（实机取证）──────────────────────────────
+            滑杆的名字可能来自两个地方，而它们**走的是两条不同的路**：
+
+              · `_bar_text`（`_table_text` 内部）—— 它自己会算百分比；
+              · 逐作层的**位置表**（`UiAltByPos`）—— 它在 `_table_text` 里
+                **先命中就先返回**，于是 `_bar_text` 那段算百分比的代码
+                被整个短路。
+
+            实机症状（自跑探针抓到的）：两根滑杆读成 `'播放进度'`。
+            `'音声音量'` —— **对，但少了数值**，而滑杆的全部意义就是那个数值：
+            「音声音量」本身是常量，玩家要知道的是「现在是多少」。
+            所以凡是拿到滑杆名字的地方，都要走这里补上百分比。
+            """
+            if not name:
+                return name
+            val = getattr(w, "value", None)
+            pct = self._bar_pct(val) if val is not None else None
+            return name if pct is None else "%s %d%%" % (name, pct)
 
         @staticmethod
         def _state_suffix(w):
