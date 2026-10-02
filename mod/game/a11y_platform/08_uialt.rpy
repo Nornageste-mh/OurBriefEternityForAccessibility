@@ -113,6 +113,28 @@ init -45 python:
         #: （玩家从看见界面到按下第一个键远不止 0.25 秒）。
         WALK_INTERVAL = 0.25
 
+        #: 同一段文案在这个时间窗内**只念一次**（秒）。
+        #:
+        #: ── 为什么需要它（实机取证：**两次**不同的抽搐都撞在这条上）──────────
+        #: 本补丁有两条让位/去重判据，各自只挡住一类重复：
+        #:   · `_track_focus` 按**位置键**判断「还是不是同一个控件」；
+        #:   · `_announce` 按 `_focus_key`（文本 + 界面 + 坐标）判断「念没念过」。
+        #: 但主菜单这种界面**有动画**，引擎每帧重建焦点表、坐标跟着动 ⇒
+        #: 位置键一直变，两条都挡不住。实测（自跑，探针每 0.6 秒推一步）：
+
+        #:     [alt] 焦点=ImageButton 文本='开始游戏'   ← 0.5 秒内 11 次
+        #:     [alt] 播报: 开始游戏                      ← 每次都真的调了 NVDA
+        #:     （…×11，间隔 30~80 ms）
+
+        #: 听感就是「按住方向键 → 同一句抽搐式地反复念」—— 与用户报的那个症状
+        #: 完全一致（音声界面的 0.1 秒 timer 只是**最容易触发**的那一个界面）。
+        #: 位置会动、身份会变，**唯一稳定的是文案本身**，所以最后一道去重必须按
+        #: 文本来做：`(文案, 界面名)` 在这个窗口内只念一次。
+        #: 窗口取 0.9 秒：比人手连按方向键的间隔（约 0.3~0.5 秒）长，
+        #: 又短于「刻意再听一遍」的间隔，不会把有意义的重读吞掉
+        #: （玩家要重听有 **F5**，那是显式通路，不受这里影响）。
+        SAY_DEDUP_WINDOW = 0.9
+
         def __init__(self):
             self._t = 0.0
             self._loc = {}        # id(widget) -> (界面名, (x, y))
@@ -123,7 +145,8 @@ init -45 python:
             self._focus_id = None      # 当前焦点的**位置键** (界面名, (x, y))
             self._focus_text = None
             self._where_miss = 0       # 位置查不到的次数（诊断：静默事故的探针）
-            self._said_last = (None, None)
+            self._said_at = 0.0        # 上次播报的时刻（`SAY_DEDUP_WINDOW` 用）
+            self._said_text = None     # 上次播报的 (文案, 界面名)
 
         # ================================================================ 入口
         def tick(self):
@@ -799,16 +822,30 @@ init -45 python:
             ⇒ 它管了。不要改回「按时间让位」——那条判据会让本层永远让位
             （引擎一直在报别的文本），实机反馈就是「和刚才没区别」。
             """
-            my = self._focus_key(w, text)
-            if my == self._said_last:
+            # ★ 去重只有**一条**判据：**文案 + 界面 + 时间窗**。
+            #
+            #   ⚠ 这里曾经还有一条「`(文本,界面,坐标)` 与上次完全相同就不念」。
+            #     它是**过强**的，而且与时间窗语义重复 —— 探针当场抓到两个后果：
+            #       · 窗口**过期之后**同句再也念不出来（玩家走回来听不到）；
+            #       · 引擎刚让位过一条，本层随后就永远念不出那一条。
+            #     位置与对象身份在有动画的界面上本来就不稳定（见 `_focus_key`），
+            #     拿它们做「念过没有」的判据既不可靠、又只会带来静默。
+            #     所以：**位置只用来做身份区分，不做去重**；去重按文案 + 时间窗。
+            import time
+            now = time.monotonic()
+            where = self._where(w)
+            screen = None if where is self._NO_WHERE else where[0]
+            key = (text, screen)
+            if key == self._said_text and (now - self._said_at) < self.SAY_DEDUP_WINDOW:
                 return
-            self._said_last = my
             try:
                 last = getattr(A11yHost.rpy, "last_sink_text", None)
             except Exception:
                 last = None
             if last and (text in last or last in text):
                 return
+            self._said_text = key
+            self._said_at = now
             A11yHost.said("[alt] 播报: " + text[:60])
             A11yHost.repeat.say(text, interrupt=True, record=False)
 
