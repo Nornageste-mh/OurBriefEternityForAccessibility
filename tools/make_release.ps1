@@ -4,6 +4,7 @@
 #   powershell -ExecutionPolicy Bypass -File tools\make_release.ps1
 #   powershell -ExecutionPolicy Bypass -File tools\make_release.ps1 -OutDir "D:\发布"
 #   powershell -ExecutionPolicy Bypass -File tools\make_release.ps1 -Version 0.0.0.9   # 仅调试用
+#   powershell -ExecutionPolicy Bypass -File tools\make_release.ps1 -ZdsrDir "D:\zdsr\zdsr"  # 指定争渡 dll 来源
 #
 # ⚠ 本文件必须以 **UTF-8 带 BOM** 保存（同 install.ps1，断言 J 专拦这件事）。
 #
@@ -13,6 +14,8 @@
 #   game\a11y_platform\*.rpy         →  <游戏目录>\game\a11y_platform\
 #   game\a11y_game\*.rpy             →  <游戏目录>\game\a11y_game\
 #   game\nvdaControllerClient64.dll  →  <游戏目录>\game\
+#   game\ZDSRAPI_x64.dll             →  <游戏目录>\game\   （0.0.1.7 起：争渡兜底副本）
+#   game\ZDSRAPI.dll                 →  <游戏目录>\game\   （同上，32 位那份）
 #   安装说明.md / 常见问题.md / licenses\  →  <游戏目录>\（文档与许可证，可留可删）
 #
 # ⚠ 为什么不再有安装器：曾经的包把 `install.ps1` 放在**包根**，而脚本是按
@@ -25,7 +28,7 @@
 #   下面 `$ALLOWED_EXT` 里**没有 `.ps1`** ⇒「包里没有安装器」是**机械保证**的：
 #   任何脚本文件进清单都会在自检处报错退出，而不是靠人记得别放。
 #
-# 这个脚本要防住的三类**静默故障**：
+# 这个脚本要防住的四类**静默故障**：
 #
 #   1. 版本号与代码不一致 —— 版本号**从代码里解析**（`90_plugin.rpy` 的
 #      `A11yHost.PatchVersion`），不手写。手写过一次（标签 v0.0.0.5 里写的是
@@ -44,14 +47,29 @@
 #      本脚本用 `CreateEntryFromFile(..., entryName)` 显式指定条目名，
 #      并在写完后再**重新打开 zip 逐条核验**：出现反斜杠就报错（不是静默接受）。
 #
+#   4. 争渡（ZDSR）dll **要么找不到、要么悄悄漏掉** —— 0.0.1.7 起包里多两份
+#      `ZDSRAPI*.dll`（兜底副本，理由见 `mod\game\a11y_platform\01_speech.rpy` 的
+#      `A11yZdsrBackend`）。它们**不在仓库里**（维护者的决定：第三方读屏二进制
+#      只进发布包，不入库），所以每次打包都要从**本机真实安装**去取；
+#      取的顺序与运行时后端**同一套**（注册表优先 → 默认安装位置）。
+#      ⚠ 本机没装争渡时**警告并继续**（包就没有兜底副本，装了争渡的玩家不受影响 ——
+#      后端会自己从注册表找到安装目录），**绝不因此让打包失败**；
+#      而只要取到了，就打印每份的字节数与 SHA256，并把它们**逐字节复制到
+#      `dist\zdsr_bundle\` 暂存**再进包（暂存目录在 `dist\` 下，`.gitignore` 已覆盖）。
+#      随包**只发这两个 dll**：故意**不发** `ZDSRAPI.ini`（它是玩家自己的配置，
+#      放进游戏目录反而会覆盖掉玩家调好的通道设置）—— 暂存目录里出现非 dll 文件即报错。
+#
 # 清单（要打进包的全部内容 —— 玩家把 zip 解压到游戏目录后，看到的就是这些）：
 #   安装说明.md / 常见问题.md        ← mod\package\
 #   licenses\*                      ← mod\package\licenses\
 #   game\a11y_platform\*.rpy        ← mod\game\a11y_platform\（补丁平台层）
 #   game\a11y_game\*.rpy            ← mod\game\a11y_game\（补丁逐作层）
 #   game\nvdaControllerClient64.dll ← mod\game\ 或 mod\
+#   game\ZDSRAPI_x64.dll            ← 本机争渡安装目录（注册表优先）
+#   game\ZDSRAPI.dll                ← 同上
 #
-# 共 16 条：11 个 `.rpy` + 1 个 dll + 2 份玩家文档 + 2 份许可证文本。
+# 共 **18 条**：11 个 `.rpy` + 3 个 dll + 2 份玩家文档 + 2 份许可证文本。
+# （本机没装争渡时是 16 条 —— 少的正是那两份 ZDSR dll。）
 # **不含 install.ps1，也不含任何 `.ps1`。**
 
 [CmdletBinding()]
@@ -62,6 +80,9 @@ param(
     # 可选：本机上已安装的游戏根目录。只用来把包里的 nvdaControllerClient64.dll
     # 与「已经装进游戏的那一份」逐字节比对（第 8 步）。不给就跳过这项核对。
     [string]$GameDir = "",
+    # 可选：争渡（ZDSR）安装目录 —— 覆盖自动发现（注册表优先）。
+    # 给了就**只从它**取 `ZDSRAPI*.dll`（排查 / 手工指定用），里面没有就警告并跳过。
+    [string]$ZdsrDir = "",
     [switch]$SkipGitCheck
 )
 
@@ -108,6 +129,16 @@ $ALLOWED_EXT = @(".rpy", ".md", ".dll", ".txt", ".json")
 #: 核对也就失去意义。改由自洽性检查兜底：仓库里的 dll 应当与**已经装进游戏目录**
 #: 的那一份逐字节相同（这就是「未经修改」那条声明的机械核对）。
 $NVDA_DLL_NAME = "nvdaControllerClient64.dll"
+
+#: 争渡（ZDSR）随包兜底的两个 dll（0.0.1.7 起）。
+#: ⚠ **只发这两个**：`ZDSRAPI.ini` 是玩家自己的通道/音色配置，
+#: 放进游戏目录会**覆盖**玩家调好的设置，所以故意不发（暂存目录里出现非 dll 即报错）。
+#: 它们**不在仓库里**：每次打包从本机真实安装取（顺序与运行时后端同一套）。
+$ZdsrDllNames = @("ZDSRAPI_x64.dll", "ZDSRAPI.dll")
+
+#: 争渡在注册表「卸载」项里登记的名字里必然出现的字样（判据与 `Zdsr.cs` / Python 后端一致）。
+#: 「争渡」= 本体，`zdsr`（不分大小写）= 可能是周边工具（本机实测 ZDSRHook 就是这种）。
+$ZdsrRegKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
 
 #: 固定的条目时间戳（1980-01-01 是 ZIP 格式的下限）。
 #: 好处：同一份源码打两次包，zip 逐字节相同（可对账、可复现）。
@@ -206,6 +237,137 @@ function Add-ManifestTreeIfExists([string]$Dir, [string]$RelPrefix, [string[]]$E
 
 function Get-Sha256([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+}
+
+function Get-ZdsrRegistryDirs {
+    # 从注册表「卸载」项里找争渡的安装目录（**与运行时后端同一套判据**）。
+    #
+    # 本机实测依据（2026-10-16）：
+    #   HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{301A…}_is1
+    #       DisplayName     = 争渡读屏
+    #       InstallLocation = C:\Program Files (x86)\zdsr\zdsr\
+    # 另有一条 `ZDSR hook control v2.1.0` → `C:\Program Files\ZDSRHook`：
+    # 名字里含 zdsr 但目录里**没有** ZDSRAPI.dll —— 所以它排在本体后面，
+    # 只用来在「本体那条被清掉」时多一次机会，不是判据。
+    #
+    # HKLM / HKCU × 默认视图 / 32 位视图 / 64 位视图 各扫一遍；
+    # 读不到就是空表（**不报错**：没装争渡的机器本来就该走到这一步）。
+    $exact = New-Object System.Collections.Generic.List[string]
+    $loose = New-Object System.Collections.Generic.List[string]
+    foreach ($hive in @([Microsoft.Win32.RegistryHive]::LocalMachine,
+                        [Microsoft.Win32.RegistryHive]::CurrentUser)) {
+        foreach ($view in @([Microsoft.Win32.RegistryView]::Default,
+                            [Microsoft.Win32.RegistryView]::Registry64,
+                            [Microsoft.Win32.RegistryView]::Registry32)) {
+            try {
+                $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, $view)
+                $un = $base.OpenSubKey($ZdsrRegKey)
+                if (-not $un) { continue }
+                foreach ($nm in $un.GetSubKeyNames()) {
+                    try {
+                        $item = $un.OpenSubKey($nm)
+                        if (-not $item) { continue }
+                        $disp = [string]$item.GetValue("DisplayName")
+                        if (-not $disp) { continue }
+                        # ⚠ 先按名字收窄：卸载项里有几十条与争渡无关的程序
+                        #   （本机实测 45 条），全收进来就是几十条无谓的候选路径。
+                        $isProduct = $disp.Contains("争渡")
+                        $isLoose = $disp.ToLowerInvariant().Contains("zdsr")
+                        if (-not ($isProduct -or $isLoose)) { continue }
+                        $loc = [string]$item.GetValue("InstallLocation")
+                        if (-not $loc) { continue }
+                        $loc = $loc.Trim().Trim('"').TrimEnd("\").TrimEnd("/")
+                        if (-not $loc) { continue }
+                        if ($isProduct) { $exact.Add($loc) } else { $loose.Add($loc) }
+                    } catch { }
+                }
+            } catch { }
+        }
+    }
+    return @($exact) + @($loose)
+}
+
+function Get-ZdsrCandidateDirs([string]$Pin) {
+    # 争渡 dll 的候选目录，按优先级（与 `A11yZdsrBackend._candidate_dirs()` 同序）：
+    #   1. 注册表登记的实际安装目录    2. 默认安装位置
+    #   3. 补丁自己的目录（万一以后有人把 dll 放进仓库布局）  4. 游戏目录（同上）
+    # 去重按大小写不敏感（Windows 路径），保持顺序。
+    if ($Pin) { return @($Pin) }
+
+    $dirs = New-Object System.Collections.Generic.List[string]
+    foreach ($d in (Get-ZdsrRegistryDirs)) { $dirs.Add($d) }
+    $pf86 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+    $pf = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+    foreach ($pair in @(@($pf86, "zdsr\zdsr"), @($pf, "zdsr\zdsr"), @($pf86, "zdsr\zdcloud"))) {
+        if ($pair[0]) { $dirs.Add((Join-Path $pair[0] $pair[1])) }
+    }
+    $dirs.Add((Join-Path $RepoRoot "mod\game\a11y_platform"))
+    $dirs.Add((Join-Path $RepoRoot "mod\game"))
+    $dirs.Add((Join-Path $RepoRoot "mod"))
+
+    $out = New-Object System.Collections.Generic.List[string]
+    $seen = New-Object System.Collections.Generic.HashSet[string](
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($d in $dirs) {
+        if (-not $d) { continue }
+        $key = $d.TrimEnd("\").TrimEnd("/")
+        if ($key -and $seen.Add($key)) { $out.Add($key) }
+    }
+    return $out.ToArray()
+}
+
+function Add-ZdsrBundledDlls([string]$StageDir, [string]$Pin) {
+    # 把本机争渡安装目录里的两份 dll **逐字节复制**到暂存目录，再登记进清单。
+    # 返回实际加进清单的份数（0 = 本机没装争渡 —— 调用方负责警告）。
+    $candDirs = Get-ZdsrCandidateDirs $Pin
+    if ($Pin) {
+        Write-Host ("  来源: -ZdsrDir 指定 {0}" -f $Pin)
+    } else {
+        Write-Host "  候选目录（注册表优先，与运行时后端同一套）:"
+        $i = 0
+        foreach ($d in $candDirs) {
+            $i++
+            $mark = if (Test-Path -LiteralPath $d -PathType Container) { "存在" } else { "不存在" }
+            Write-Host ("    {0}. {1}   [{2}]" -f $i, $d, $mark)
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $StageDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
+    }
+
+    $added = 0
+    foreach ($n in $ZdsrDllNames) {
+        $src = $null
+        foreach ($d in $candDirs) {
+            $p = Join-Path $d $n
+            if (Test-Path -LiteralPath $p -PathType Leaf) { $src = $p; break }
+        }
+        if (-not $src) {
+            Write-Warning ("本机没有找到 {0} —— 发布包里不会有这一份兜底副本" -f $n)
+            continue
+        }
+        $staged = Join-Path $StageDir $n
+        Copy-Item -LiteralPath $src -Destination $staged -Force
+        Add-ManifestFile $staged "$ZipGameDir\$n" "争渡 API dll（兜底副本）"
+        Write-Host ("  {0,-16} {1,10:N0} 字节  SHA256 {2}" -f `
+                    $n, (Get-Item -LiteralPath $staged).Length, (Get-Sha256 $staged))
+        Write-Host ("  {0,-16} 来源 {1}" -f "", $src)
+        $added++
+    }
+
+    # ⚠ 「只发 dll、不发 ZDSRAPI.ini」在这里落成机械保证：
+    #   暂存目录里只要出现非 dll 文件就报错（不是警告）。
+    if (Test-Path -LiteralPath $StageDir -PathType Container) {
+        $stray = @(Get-ChildItem -LiteralPath $StageDir -File |
+                   Where-Object { $_.Extension.ToLowerInvariant() -ne ".dll" })
+        if ($stray.Count -gt 0) {
+            Fail (("争渡暂存目录里有非 dll 文件（`ZDSRAPI.ini` 一类**故意不发** —— " +
+                   "它是玩家自己的通道/音色配置，进包会覆盖玩家调好的设置）：`n        {0}") -f `
+                  (($stray | ForEach-Object { $_.FullName }) -join "`n        "))
+        }
+    }
+    return $added
 }
 
 # ---------------------------------------------------------------- 0. 定位仓库
@@ -310,6 +472,29 @@ if (-not $dllSrc) {
 }
 Add-ManifestFile $dllSrc "$ZipGameDir\$NVDA_DLL_NAME" "NVDA 客户端 dll"
 
+# 争渡（ZDSR）API dll —— 0.0.1.7 起随包带一份**兜底副本**（同样放 `game\`）。
+#
+# 为什么要带：官方文档建议应用程序直接读安装目录里那份（dll 跟着读屏一起升级），
+# 但那是**建议**不是保证 —— 很多玩家（维护者原话：「比如两年前的我」）根本找不到
+# 那个 dll，于是这一级等于不存在。所以包里带一份，同时运行时**安装目录优先**，
+# 并且「这一份报版本不匹配（InitTTS=1）就自动换下一份」（两边互为兜底）。
+#
+# ⚠ 仓库里**没有**这两个 dll（维护者的决定：第三方读屏二进制只进发布包，不入库），
+#   所以每次打包都从本机真实安装取；取不到 **警告并继续**，绝不让打包失败。
+Write-Host ""
+Write-Host "== 争渡（ZDSR）API dll（随包兜底副本；不入库）=="
+$ZdsrStageDir = Join-Path $OutDir "zdsr_bundle"
+$zdsrAdded = Add-ZdsrBundledDlls $ZdsrStageDir $ZdsrDir
+if ($zdsrAdded -eq 0) {
+    Write-Warning ("本机没有找到任何 ZDSRAPI*.dll —— 这个发布包里**没有**争渡兜底副本。`n" +
+                   "        装了争渡的玩家不受影响（后端会自己从注册表找到安装目录）；`n" +
+                   "        要带上兜底副本，请在装了争渡的机器上打包，或用 -ZdsrDir 指定目录。")
+} elseif ($zdsrAdded -lt $ZdsrDllNames.Count) {
+    Write-Warning ("只取到 {0} / {1} 份 ZDSRAPI dll —— 包里缺的那一份由安装目录那份顶上" -f `
+                   $zdsrAdded, $ZdsrDllNames.Count)
+}
+Write-Host ("  暂存目录（不入库，`dist\` 已被 .gitignore 覆盖）: {0}" -f $ZdsrStageDir)
+
 # ---------------------------------------------------------------- 4. 清单自检（IP 红线）
 
 Write-Host ""
@@ -322,15 +507,19 @@ foreach ($e in $script:Manifest) {
         Fail "清单里的源文件不见了：$($e.Src)"
     }
     # 补丁文件必须来自 mod\game\a11y_platform 或 mod\game\a11y_game
-    # （进包后挂在 `game\` 下，正好等于游戏目录里的那一层）
+    # （进包后挂在 `game\` 下，正好等于游戏目录里的那一层）；
+    # 允许直接落在 `game\` 下的只有那三个 dll（NVDA 一份 + 争渡两份）。
     if ($e.Rel -like "$ZipGameDir/*") {
         $ok = ($e.Rel -eq "$ZipGameDir/$NVDA_DLL_NAME")
+        foreach ($zn in $ZdsrDllNames) {
+            if ($e.Rel -eq "$ZipGameDir/$zn") { $ok = $true }
+        }
         foreach ($sub in $PATCH_SUBDIRS) {
             if ($e.Rel -like "$ZipGameDir/$sub/*") { $ok = $true }
         }
         if (-not $ok) {
             Fail ("补丁文件来源非法（只允许 {0}\a11y_platform / {0}\a11y_game / {0}\{1}）：{2}" -f `
-                  $ZipGameDir, $NVDA_DLL_NAME, $e.Rel)
+                  $ZipGameDir, (@($NVDA_DLL_NAME) + $ZdsrDllNames -join " 、 "), $e.Rel)
         }
     }
     # 解压即用 ⇒ 条目必须**正好落在游戏目录布局里**：要么 `game\...`，
@@ -524,7 +713,30 @@ if ($installed -and (Test-Path -LiteralPath $installed -PathType Leaf)) {
 }
 
 Write-Host ""
-Write-Host "完成。这个 zip 里只有补丁 .rpy + 玩家文档 + NVDA 客户端 dll，没有任何游戏资源。"
+Write-Host "== 争渡（ZDSR）API dll（兜底副本，仓库里没有、只进包）=="
+if ($zdsrAdded -eq 0) {
+    Write-Host "  这个包里**没有**争渡兜底副本（本机没装争渡）—— 见上面的警告"
+} else {
+    foreach ($zn in $ZdsrDllNames) {
+        $staged = Join-Path $ZdsrStageDir $zn
+        if (Test-Path -LiteralPath $staged -PathType Leaf) {
+            $srcPath = @(Get-ZdsrCandidateDirs $ZdsrDir |
+                         Where-Object { Test-Path -LiteralPath (Join-Path $_ $zn) } |
+                         Select-Object -First 1)
+            $srcShow = if ($srcPath) { Join-Path $srcPath[0] $zn } else { "(来源目录已变)" }
+            Write-Host ("  {0,-16} {1,10:N0} 字节  SHA256 {2}" -f `
+                        $zn, (Get-Item -LiteralPath $staged).Length, (Get-Sha256 $staged))
+            Write-Host ("  {0,-16} 取自 {1}" -f "", $srcShow)
+        }
+    }
+    Write-Host "  ⚠ 随包**只发这两个 dll，不发 ZDSRAPI.ini**（那是玩家自己的通道/音色配置）。"
+    Write-Host "  ⚠ 运行时**安装目录那份优先**；这一份报版本不匹配（InitTTS=1）时后端会自动换下一份。"
+}
+
+Write-Host ""
+Write-Host ("完成。这个 zip 里只有补丁 .rpy + 玩家文档 + {0} 个第三方 dll（NVDA 1 个 + 争渡 {1} 个），" -f `
+            (1 + $zdsrAdded), $zdsrAdded)
+Write-Host "      没有任何游戏资源。"
 Write-Host "      **解压即用**：玩家把 zip 解压到游戏根目录（与 OurBriefEternity.exe 同级）、"
 Write-Host "      选「合并 / 覆盖」就装完了 —— 包里没有安装器，也不需要跑任何脚本。"
 exit 0

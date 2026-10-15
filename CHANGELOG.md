@@ -4,6 +4,134 @@
 "尚未查清"的东西写在 `无障碍可行性验证.md` 与 `docs/已验证版本.md` 里，
 不在这里冒充已修复。
 
+## 0.0.1.7 —— 争渡 dll **自动查找**（注册表）+ 版本不匹配自动换下一份 + 发布包带兜底副本
+
+版本号唯一来源是 `mod/game/a11y_game/90_plugin.rpy` 的 `A11yHost.PatchVersion`
+（`tools/make_release.ps1` 按它取值并强制 `^\d+\.\d+\.\d+\.\d+$`）。
+**本版尚未打标签**（`v0.0.1.7` 要等提交后打）—— 断言 G 因此会打一行
+「当前提交没有版本标签，跳过」，那是**预期的**，不是回归。
+
+这一版解决的是维护者那句原话里的问题：**「很多用户找不到那个 dll（比如两年前的我）」**。
+0.0.1.6 的 ZDSR 后端只找 `C:\Program Files (x86)\zdsr\zdsr` 这类**默认路径**，
+装在别的盘 / 自定义目录的玩家于是等于「这一级不存在」。
+
+### ① 自动找到争渡的安装目录（注册表优先，`A11yZdsrBackend._candidate_dirs`）
+
+候选顺序（与上游 `Zdsr.cs` 的 `BuildCandidates` 同一套，参考实现已在
+`D:\DSHWorkSpace\zdsr_work\Framework\platform\Zdsr.cs` 里跑通）：
+
+| # | 来源 | 说明 |
+|---|---|---|
+| 1 | 注册表 `争渡读屏 → InstallLocation` | HKLM + HKCU × 默认/32 位/64 位视图，全查 |
+| 2 | 默认安装位置 | `%ProgramFiles(x86)%\zdsr\zdsr`、`%ProgramFiles%\zdsr\zdsr`、`%ProgramFiles(x86)%\zdsr\zdcloud` |
+| 3 | 补丁自己的目录 | `<游戏目录>\game\a11y_platform\` |
+| 4 | 游戏目录 | `<游戏目录>\game\`（随包兜底副本就落在这里） |
+
+本机实测（2026-10-16，只读）：
+
+```
+HKLM Registry32 :: {301A3D3B-…}_is1 = 争渡读屏 | InstallLocation = C:\Program Files (x86)\zdsr\zdsr\
+HKLM Registry64 :: ZDSRHook        = ZDSR hook control v2.1.0 | InstallLocation = C:\Program Files\ZDSRHook
+```
+
+后一条正是「**同名迷惑项**」：`ZDSRHook` 名字里含 `zdsr`、也登记了 `InstallLocation`，
+可那目录里**没有** `ZDSRAPI.dll`。所以判据分两档 —— `DisplayName` 含「争渡」的
+**本体排前面**，只含 `zdsr` 的排后面（排后面只是省一次无谓的尝试，**不是**能不能用的判据）。
+⚠ 这里还必须**先按名字收窄**再收集：卸载项里有几十条与争渡毫无关系的程序
+（`7-Zip`、`Git`、Steam 上一堆游戏……），全收进来会让候选目录表变成几十条无谓路径 ——
+这一条是探针第 16 组**当场抓出来的**（第一次实现漏了收窄，真注册表读回来 45 条）。
+
+`A11Y_ZDSR_DIR` 一旦设置就**只找它列出的目录**（多个用 `;` 分隔，与上游同名）：
+排查用，也是自检工具把搜索范围钉死的手段 —— 否则本机真实安装会参与进来，
+「候选顺序」这类断言就变成碰运气。
+
+`winreg` 是标准库 ⇒ 补丁依旧是**零第三方依赖**；整段包 `try`，注册表读不到
+只是「没有候选目录」，**绝不抛异常**。
+
+### ② `InitTTS == 1`（版本不匹配）⇒ 自动换下一份候选
+
+这是「随包带兜底副本」能成立的**前提**，也是它必须有的配套：
+
+- 包里那份 dll 会随争渡升级而过期（官方文档自己写着 26.6 更新过 dll）⇒ 换到**安装目录**那份；
+- 安装目录那份坏了 / 对不上（装了两份、升级到一半）⇒ 换回**包里**那份。
+
+判据**只有 `InitTTS == 1`**（与 `Zdsr.cs` 的 `EnsureInit` 逐字一致）：其余返回码表示
+「这个后端现在不可用」（读屏没跑 / 没授权），换一份 dll 没有任何意义。
+全部候选试完仍不匹配时，结论里列出**试过哪几份完整路径**，让日志能直接回答
+「为什么这一级不在链上」。顺带补上：某一份**加载失败**（位宽不对 / 文件坏了 / 缺导出）
+也会继续试下一份（`Zdsr.cs` 的 `ProbeFrom` 就是这么做的）。
+
+### ③ 发布包带两份兜底 dll（只进包，**不入库**）
+
+`tools/make_release.ps1` 现在把 `ZDSRAPI_x64.dll` 与 `ZDSRAPI.dll` 放进 zip 的 `game\`
+（与 `nvdaControllerClient64.dll` 同级），来源用**与运行时同一套发现顺序**（注册表优先），
+新增 `-ZdsrDir` 参数可覆盖来源目录。三条纪律：
+
+1. **只发这两个 dll，不发 `ZDSRAPI.ini`** —— 那是玩家自己的通道/音色配置，
+   进包会覆盖玩家调好的设置。暂存目录里出现非 dll 文件就**报错退出**（机械保证）。
+2. **本机没装争渡 ⇒ 警告并继续，绝不让打包失败**（包就没有兜底副本；
+   装了争渡的玩家不受影响 —— 后端会自己从注册表找到安装目录）。
+3. **dll 不进仓库**：先复制到 `dist\zdsr_bundle\` 暂存（`dist/` 已被 `.gitignore` 覆盖），
+   再进包；`git status --porcelain` 里不会出现它们。
+
+包内条目数因此从 **16 → 18**（本机没装争渡时仍是 16）。
+
+### 实机/离线证据（可重复执行）
+
+```powershell
+python tools\lint_patch.py        # 12 条断言全绿（断言 D 未给 --game-python 时跳过；断言 G 无标签，预期跳过）
+                                  #   本机另跑一次 --game-python "<游戏>\lib\py3-windows-x86_64\python.exe"
+                                  #   ⇒ 断言 D 真跑：19 个键名全部存在
+python tools\probe_speech.py      # 全部 check 通过（本机实跑 110 处 OK、0 处不通过；
+                                  #   第 16、17 组是本次新增，共 26 处 check）
+powershell -ExecutionPolicy Bypass -File tools\make_release.ps1 -OutDir dist\_dryrun
+git status --porcelain            # 只有本仓库自己的改动，**没有** ZDSR dll
+```
+
+- 真 `ZDSRAPI_x64.dll` 只读活体（**只调 `InitTTS` / `GetSpeakState`，不调 `Speak`**）：
+  候选表由后端**自己发现**（第 1 份正是注册表指向的
+  `C:\Program Files (x86)\zdsr\zdsr\ZDSRAPI_x64.dll`），
+  `InitTTS(0, NULL, False) -> 0`、`GetSpeakState() -> 4`（空闲），`available() -> True`。
+  ⚠ 0.0.1.6 那版这一步是写死路径的，所以「装在别的盘上找不到」这件事**探针也测不出来** ——
+  这一版改成按后端自己的候选表判跳过，才算真验到。
+- 第 16 组（假注册表驱动真源码）：候选顺序、本体优先于 `zdsr` 周边工具、
+  缺字段条目丢弃、尾斜杠修剪、注册表读不到时的降级、`A11Y_ZDSR_DIR` 钉死
+  （且证明钉死时**一次都没读注册表**）、64 位那份跨目录优先、目录里没有 dll 就不进候选表；
+  另有一组**真注册表只读**断言（读到 3 条、本体排在 `ZDSRHook` 之前）。
+- 第 17 组（假 dll 替掉 `ctypes.WinDLL`，被测的仍是真源码）：
+  `InitTTS=1` ⇒ 换第二份并握手成功（且**只按顺序加载两份**）；
+  `InitTTS=2` ⇒ **不换**（只加载了一份）；两份都 `=1` ⇒ 判不可用、结论里列出两份路径、
+  且**没有被次生的「GetSpeakState 调用异常」覆盖**；第一份**加载失败**或**缺导出** ⇒ 用第二份；
+  `Braille` 缺失不算失败。
+- 打包 dry-run：18 个条目、全部 `/` 分隔、两个 ZDSR dll 落在 `game\`，
+  并打印了字节数与 SHA256（`ZDSRAPI_x64.dll` 404,624 字节 /
+  `ZDSRAPI.dll` 328,336 字节，来源 `C:\Program Files (x86)\zdsr\zdsr\`）；
+  用 `-ZdsrDir <空目录>` 复跑一遍 ⇒ 只打印警告、条目回到 16、**打包成功**。
+
+### 不许当成已验证（本版**没有**做过的事）
+
+- **争渡真的念出游戏台词**：仍然没有验过。本版只验到「注册表能找到它、dll 能加载、
+  `InitTTS -> 0`、`GetSpeakState -> 4`、判据成立」；**没有调用过 `Speak`**
+  （不打扰正在用机器的维护者），也没有在游戏里按过 F9。
+- **兜底副本「真的被用上」没有在真机上发生过**：本机那份 `ZDSRAPI_x64.dll` 是**匹配**的，
+  真 dll 复现不出 `InitTTS == 1`；所以这条路是**假 dll 桩 + 真源码**验的
+  （探针第 17 组），不是实机验的。造一个能返回 1 的真 dll 需要争渡的旧版本，
+  本机没有、也不该去动 `C:\Program Files` 下的安装。
+- **「删掉包里那份 dll 会怎样」没有在游戏里试过**：按设计它只是回到
+  「读安装目录那份」，不需要重装 —— 但这条是**读代码得出的**，不是实测。
+
+### 文档一致性（同一次改动里改掉的「代码一个说法、文档另一个说法」）
+
+`README.md`（状态段 / 安装包内容与条目数 / 目录树 / 已知问题里的 ZDSR 那条 /
+合规与许可里的第三方 dll 清单 / 致谢）、`mod/package/安装说明.md`
+（解压后多了什么 / 那个 dll 那一节 / 已知限制）、`mod/package/常见问题.md`
+（第 10 条「支持争渡吗」补上自动查找与兜底副本、**新增第 13 条「找不到 ZDSRAPI.dll 怎么办」**）、
+`mod/package/licenses/README.txt` 与 `licenses/THIRD-PARTY-NOTICES.txt`
+（第三方二进制从「一个」改成「三个」并写清争渡那两份的来历与许可立场）、
+根 `THIRD-PARTY-NOTICES.md`、`tools/README.md`（`make_release.ps1` 与
+`probe_speech.py` 那两行）、`docs/已验证版本.md`（版本表 / 一句话 / 未解决项 / 自检套餐）、
+`.gitignore`（写明争渡 dll 只进包、不入库）。
+
 ## 0.0.1.6 —— 争渡（ZDSR）接入链上第三级 + 后端切换键（F9）的改造
 
 版本号唯一来源是 `mod/game/a11y_game/90_plugin.rpy` 的 `A11yHost.PatchVersion`

@@ -36,6 +36,18 @@
     · **键名支持人话写法**：`"Alt+Shift+F9"` -> `"alt_shift_K_F9"`
       （抽 `06_keymap.rpy` 的 `_A11yKeySpec` 真源码来跑，不是探针里抄一份）。
 
+0.0.1.7 追加的两组（ZDSR dll 自动查找与版本不匹配回退）：
+    · **第 16 组 候选发现**：候选顺序必须是
+      「注册表登记的安装目录（DisplayName 含「争渡」的本体在前）→ 默认安装位置 →
+      补丁自己的目录 → 游戏目录」；`A11Y_ZDSR_DIR` 设了就**只找它列出的目录**；
+      64 位那份**跨目录优先**（不能被某个目录里的 32 位那份挡住）。
+      用**假注册表**驱动真源码（真实注册表另有一组只读断言），所以断言不碰运气；
+    · **第 17 组 版本不匹配回退**：`InitTTS` 返回 `1`（版本不匹配）时必须
+      **自动换下一份候选**（随包那份过期 / 安装目录那份对不上，两种方向都要能活），
+      而**只有 `1` 才换**（其余返回码表示「这个后端现在不可用」，换 dll 没意义 ——
+      与上游 `Zdsr.cs` 的 `EnsureInit` 一致）。假 dll 由**替掉 `ctypes.WinDLL`** 实现，
+      被测的仍是真源码；全程不加载真 dll、不发声。
+
 用法：
     python tools/probe_speech.py
 """
@@ -45,10 +57,17 @@ from __future__ import annotations
 import ast
 import os
 import re
+import shutil
 import sys
+import tempfile
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+#: ⚠ 探针**自己管** `A11Y_ZDSR_DIR`（第 16 组要拿它钉死搜索范围），所以先把本机
+#: 环境里的同名变量清掉 —— 否则同一份代码在一台设过它的机器上会得出另一种结论，
+#: 断言就从「机械验证」变成「碰运气」。
+os.environ.pop("A11Y_ZDSR_DIR", None)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(REPO, "mod", "game", "a11y_platform", "01_speech.rpy")
@@ -56,8 +75,10 @@ KM = os.path.join(REPO, "mod", "game", "a11y_platform", "06_keymap.rpy")
 CONTRACT = os.path.join(REPO, "mod", "game", "a11y_platform", "00_contract.rpy")
 PLUGIN = os.path.join(REPO, "mod", "game", "a11y_game", "90_plugin.rpy")
 
-#: 真 dll 的默认位置（争渡读屏安装目录，官方文档写的就是这里）。
-#: 找不到时活体检查跳过 —— 探针必须在没装争渡的机器上也能跑完。
+#: 真 dll 的**期望**位置（争渡读屏默认安装目录，官方文档写的就是这里）。
+#: ⚠ 0.0.1.7 起后端**不靠这个常量**找 dll —— 它自己按「注册表 → 默认位置 →
+#: 补丁目录 → 游戏目录」找（第 16 组钉住这条）。这个常量留在这里只做两件事：
+#: ① 本机没装争渡时把「期望在哪」印出来；② 钉住「注册表发现的那条与官方默认位置一致」。
 ZDSR_DLL = r"C:\Program Files (x86)\zdsr\zdsr\ZDSRAPI_x64.dll"
 
 #: `GetSpeakState()` 的**全部**官方返回码 → 人话。
@@ -395,28 +416,38 @@ check("register_builtin 里 NVDA -> ZDSR -> SAPI 的注册次序成立（顺序�
 
 # ── 13) 真 DLL 活体检查（只读：只调 InitTTS / GetSpeakState，**不调 Speak**）──
 print("\n[13] 真 ZDSRAPI_x64.dll 活体检查（走 A11yZdsrBackend 真源码；不发声、不启动读屏）")
-if not os.path.exists(ZDSR_DLL):
-    print(f"  --  未找到 {ZDSR_DLL}（本机没装争渡）—— 跳过，不计失败")
+
+class _StubNvda(object):
+    """只补 `A11yZdsrBackend._candidate_dirs()` 复用的那个兜底目录函数。
+
+    （活体检查关心的是「后端自己能不能找到 dll」与「判据怎么判」，
+    补丁自己目录 / 游戏目录这一档这里不参与，给空表即可；
+    这样也能让探针在非 Windows 上被 import。）
+    """
+
+    @staticmethod
+    def _candidate_dirs():
+        return []
+
+zhost = FakeHost()
+zns = {"A11yHost": zhost, "A11yNvdaBackend": _StubNvda}
+exec(compile(dedent4(zdsr_src), "<A11yZdsrBackend>", "exec"), zns)
+Zdsr = zns["A11yZdsrBackend"]
+
+#: ★ 这里**故意不写死路径**：跳过判据用的是后端自己的候选表 ——
+#:   「它找得到吗」正是本组要验的东西（0.0.1.6 那版写死 `C:\Program Files (x86)\...`，
+#:   装在别的盘上的机器会被判成「没装争渡」，恰好是这一版要修的那个故障）。
+_probe_paths = Zdsr._candidate_paths()
+if not _probe_paths:
+    print(f"  --  后端一个 ZDSRAPI*.dll 都没找到（本机没装争渡）—— 跳过，不计失败")
+    print(f"      期望位置：{ZDSR_DLL}")
+    print(f"      实际候选目录：{Zdsr._candidate_dirs()}")
 else:
-    print(f"  dll: {ZDSR_DLL}")
+    print("  后端自己发现的候选 dll（按优先级）：")
+    for _p in _probe_paths:
+        print(f"    {_p}")
     print("  （争渡的 dll 每次 InitTTS 会往 stdout 写一行 `--------------InitTTS rt = N`，")
     print("    那是它自己的输出，不是本探针打印的 —— 见到别当成乱码）")
-
-    class _StubNvda(object):
-        """只补 `A11yZdsrBackend._candidate_dirs()` 复用的那个兜底目录函数。
-
-        （活体检查关心的是「官方目录能不能找到 dll」与「判据怎么判」，
-        兜底目录这里不参与，给空表即可；这样也能让探针在非 Windows 上被 import。）
-        """
-
-        @staticmethod
-        def _candidate_dirs():
-            return []
-
-    zhost = FakeHost()
-    zns = {"A11yHost": zhost, "A11yNvdaBackend": _StubNvda}
-    exec(compile(dedent4(zdsr_src), "<A11yZdsrBackend>", "exec"), zns)
-    Zdsr = zns["A11yZdsrBackend"]
 
     z = Zdsr()
     z.init()
@@ -425,9 +456,12 @@ else:
         print(f"    （加载失败原因：{z.reason()}）")
     else:
         print(f"    loaded_from   : {z.loaded_from}")
+        print(f"    候选表里的第几份: {z._index + 1} / {len(z._paths)}")
         print(f"    盲文导出      : {'有' if z._has_braille else '无'}")
         print(f"    InitTTS rc    : {z._init_rc}"
               f"（握手{'成功' if z._handshake_ok else '失败：' + str(z._init_why)}）")
+        check("★ 加载的是候选表里的**第一份**（没在没必要时乱换 dll）",
+              z.loaded_from == _probe_paths[0], f"实得 {z.loaded_from}")
         z._read_state()                 # 强制刷新一次，别拿 init 时的缓存下结论
         rc = z._state
         avail = z.available()
@@ -627,6 +661,297 @@ check('逐作层把默认键写实为 ["K_F9"]（默认就是 F9）',
 check("契约层提供跨启动记忆接口 recall/remember（平台层不直接碰引擎）",
       re.search(r"def recall\(", c_text) is not None
       and re.search(r"def remember\(", c_text) is not None)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 以下两组是 0.0.1.7 新增的（ZDSR dll 自动查找 + 版本不匹配回退）
+#
+# 两组都**不加载真 dll、不发声**：候选表用假注册表驱动真源码，
+# 「版本不匹配」那条路用**替掉加载器**的假 dll 驱动真源码。
+# 理由：本机那份 dll 是**匹配**的，真 dll 复现不出 `InitTTS == 1`；
+# 而造一个真 dll 需要编译器，且会让探针依赖本机工具链。
+# 替掉 `ctypes.WinDLL` 之后，被测的仍然是后端自己的代码：
+# 候选表的遍历、换候选的时机、结论串的拼法，全是它算出来的。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def env_pin(value):
+    """设置 / 清掉 `A11Y_ZDSR_DIR`（探针自己管，不让本机同名环境变量影响断言）。"""
+    if value is None:
+        os.environ.pop("A11Y_ZDSR_DIR", None)
+    else:
+        os.environ["A11Y_ZDSR_DIR"] = value
+
+
+def new_zdsr(reg_entries=None, nvda_dirs=(), env=None, reg_raises=False):
+    """造一个 `A11yZdsrBackend` **类**（真源码），把它看到的世界钉成参数给定的样子。
+
+    · `reg_entries` —— 假注册表 `(DisplayName, InstallLocation)` 表；
+    · `nvda_dirs`   —— 假 `A11yNvdaBackend._candidate_dirs()`（= 补丁自己 / 游戏目录那一档）；
+    · `env`         —— `A11Y_ZDSR_DIR`（设了就只找它列出的目录）；
+    · `reg_raises`  —— 让「读注册表」直接抛异常，用来证明钉死模式下**根本没去读**。
+    """
+    class _Nvda(object):
+        @staticmethod
+        def _candidate_dirs():
+            return list(nvda_dirs)
+
+    host = FakeHost()
+    ns = {"A11yHost": host, "A11yNvdaBackend": _Nvda}
+    exec(compile(dedent4(zdsr_src), "<A11yZdsrBackend>", "exec"), ns)
+    Z = ns["A11yZdsrBackend"]
+
+    if reg_raises:
+        def _boom():
+            raise RuntimeError("钉死模式下不该读注册表")
+        Z._registry_uninstall_entries = staticmethod(_boom)
+    else:
+        Z._registry_uninstall_entries = staticmethod(lambda: list(reg_entries or ()))
+
+    env_pin(env)
+    return Z, host
+
+
+# ── 16) ★ 候选发现：注册表优先 + 顺序 + 钉死 ────────────────────────────
+print("\n[16] ★ dll 候选发现（假注册表驱动真源码；真实注册表另有一组只读断言）")
+
+PF86 = os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"
+PF = os.environ.get("ProgramFiles") or r"C:\Program Files"
+DEF_DEFAULT = [os.path.join(PF86, "zdsr", "zdsr"),
+               os.path.join(PF, "zdsr", "zdsr"),
+               os.path.join(PF86, "zdsr", "zdcloud")]
+
+# (a) 完整形态：注册表两条 + 默认三条 + 补丁自己 + 游戏目录
+Z16, _h16 = new_zdsr(
+    reg_entries=[("争渡读屏", r"D:\争渡\zdsr\\"),                    # 尾斜杠要 Trim
+                 ("ZDSR hook control v2.1.0", r"C:\Program Files\ZDSRHook"),
+                 ("没有安装目录的条目", ""),                          # 缺 InstallLocation 要丢
+                 ("", r"D:\没有显示名的条目")],                       # 缺 DisplayName 要丢
+    nvda_dirs=[r"R:\g\game\a11y_platform", r"R:\g", r"R:\g\game"])
+want16 = ([r"D:\争渡\zdsr", r"C:\Program Files\ZDSRHook"] + DEF_DEFAULT +
+          [r"R:\g\game\a11y_platform", r"R:\g", r"R:\g\game"])
+got16 = Z16._candidate_dirs()
+check("候选顺序 = 注册表 → 默认安装位置 → 补丁自己 → 游戏目录",
+      got16 == want16, f"实得 {got16}")
+check("★ DisplayName 含「争渡」的本体排在只含 zdsr 的条目之前（ZDSRHook 那种排后面）",
+      got16.index(r"D:\争渡\zdsr") < got16.index(r"C:\Program Files\ZDSRHook"),
+      f"实得 {got16[:2]}")
+check("缺 DisplayName / 缺 InstallLocation 的条目被丢掉（不猜路径）",
+      len(got16) == len(want16) and "D:\\没有显示名的条目" not in got16)
+check("安装目录尾部的反斜杠被去掉（注册表里那条就带尾斜杠）",
+      r"D:\争渡\zdsr" in got16 and r"D:\争渡\zdsr\\" not in got16)
+
+# (b) 注册表读不到 ⇒ 只是少了那两条，其余照旧，**不抛异常**
+Z16b, _h16b = new_zdsr(reg_entries=None, nvda_dirs=[r"R:\g\game"])
+check("注册表一条都读不到 ⇒ 默认位置照旧（自动查找不是「有注册表才行」）",
+      Z16b._candidate_dirs() == DEF_DEFAULT + [r"R:\g\game"],
+      f"实得 {Z16b._candidate_dirs()}")
+
+# (c) 钉死模式：设了 A11Y_ZDSR_DIR 就**只找它列出的目录**（多个用 ; 分隔）
+Z16c, _h16c = new_zdsr(reg_entries=[("争渡读屏", r"D:\不该被读到")],
+                       nvda_dirs=[r"R:\g"], env=r"D:\a;D:\b",
+                       reg_raises=True)
+check("★ A11Y_ZDSR_DIR 设了 ⇒ 只找它列出的目录（分号分隔），注册表一次都不读",
+      Z16c._candidate_dirs() == [r"D:\a", r"D:\b"], f"实得 {Z16c._candidate_dirs()}")
+env_pin(None)
+
+# (d) 64 位那一份**跨目录优先**（不能被 32 位那份挡住）
+_tmp16 = tempfile.mkdtemp(prefix="a11y_zdsr_probe_")
+try:
+    d32 = os.path.join(_tmp16, "only32")
+    d64 = os.path.join(_tmp16, "has64")
+    os.makedirs(d32)
+    os.makedirs(d64)
+    open(os.path.join(d32, "ZDSRAPI.dll"), "wb").close()          # 只有 32 位那份
+    open(os.path.join(d64, "ZDSRAPI_x64.dll"), "wb").close()      # 只有 64 位那份
+    Z16d, _h16d = new_zdsr(reg_raises=True, env=d32 + ";" + d64)
+    check("★ 先在所有候选目录里找 64 位那份（32 位那份不得挡住它）",
+          Z16d._candidate_paths() == [os.path.join(d64, "ZDSRAPI_x64.dll"),
+                                      os.path.join(d32, "ZDSRAPI.dll")],
+          f"实得 {Z16d._candidate_paths()}")
+    Z16e, _h16e = new_zdsr(reg_raises=True, env=d32 + ";" + os.path.join(_tmp16, "没有这个目录"))
+    check("候选目录里没有 dll 就不进候选表（不会拿一个不存在的路径去加载）",
+          Z16e._candidate_paths() == [os.path.join(d32, "ZDSRAPI.dll")],
+          f"实得 {Z16e._candidate_paths()}")
+finally:
+    env_pin(None)
+    shutil.rmtree(_tmp16, ignore_errors=True)
+
+# (e) 真注册表（只读）：读得到、不抛异常，且**本体排在周边工具之前**
+live_entries = Zdsr._registry_uninstall_entries()
+check("真注册表（只读）：读得到条目、不抛异常、每条都是 (DisplayName, InstallLocation)",
+      isinstance(live_entries, list)
+      and all(isinstance(e, tuple) and len(e) == 2 for e in live_entries),
+      f"共 {len(live_entries)} 条")
+_exact = [d for d, l in live_entries if "争渡" in (d or "")]
+_loose = [d for d, l in live_entries if "争渡" not in (d or "") and "zdsr" in (d or "").lower()]
+live_dirs = Zdsr._registry_dirs()
+if _exact and _loose:
+    check("★ 真注册表：含「争渡」的安装目录排在只含 zdsr 的之前（本机实测 ZDSRHook）",
+          live_dirs.index(
+              [l.strip().strip('"').rstrip("\\/") for d, l in live_entries if "争渡" in d][0])
+          < live_dirs.index(
+              [l.strip().strip('"').rstrip("\\/") for d, l in live_entries
+               if "争渡" not in d and "zdsr" in d.lower()][0]),
+          f"实得 {live_dirs}")
+else:
+    print(f"  --  真注册表里「争渡本体 / zdsr 周边工具」没有同时存在 —— 顺序断言跳过"
+          f"（读到 {len(live_entries)} 条）")
+print(f"  真注册表读到的候选目录：{live_dirs if live_dirs else '(无)'}")
+if os.path.exists(ZDSR_DLL):
+    check("★ 注册表登记的那条 == 官方默认位置（本机档案：C:\\Program Files (x86)\\zdsr\\zdsr）",
+          os.path.normcase(os.path.dirname(ZDSR_DLL)) in
+          [os.path.normcase(d) for d in live_dirs],
+          f"实得 {live_dirs}")
+    check("★ 后端自己找出来的 dll 就是本机档案里那一份",
+          os.path.normcase(ZDSR_DLL) in [os.path.normcase(p) for p in _probe_paths],
+          f"实得 {_probe_paths}")
+
+
+# ── 17) ★ InitTTS == 1（版本不匹配）⇒ 自动换下一份候选 ──────────────────
+print("\n[17] ★ 版本不匹配回退（假 dll 替掉加载器；不加载真 dll、不发声）")
+
+
+class _FakeFunc(object):
+    """假导出：有 `argtypes` / `restype`（后端会去赋值），调用时记一笔并返回预设值。"""
+
+    def __init__(self, fn):
+        self.argtypes = None
+        self.restype = None
+        self._fn = fn
+        self.calls = []
+
+    def __call__(self, *a):
+        self.calls.append(a)
+        return self._fn(*a)
+
+
+class _FakeDll(object):
+    """假 ZDSRAPI dll：够 `A11yZdsrBackend` 绑定那四个导出就行（`Braille` 可选）。"""
+
+    def __init__(self, init_rc=0, state=4, braille=True):
+        self.InitTTS = _FakeFunc(lambda *a: init_rc)
+        self.Speak = _FakeFunc(lambda *a: 0)
+        self.GetSpeakState = _FakeFunc(lambda *a: state)
+        self.StopSpeak = _FakeFunc(lambda *a: None)
+        if braille:
+            self.Braille = _FakeFunc(lambda *a: 0)
+
+
+class _FakeLoader(object):
+    """替掉 `ctypes.WinDLL`：按路径发假 dll，并记下**加载过哪几份、什么顺序**。"""
+
+    def __init__(self, table):
+        self.table = dict(table)
+        self.calls = []
+
+    def __call__(self, path):
+        self.calls.append(path)
+        lib = self.table.get(path)
+        if lib is None:
+            raise OSError("[WinError 126] 找不到指定的模块。")
+        return lib
+
+
+class _fake_loader(object):
+    """`with _fake_loader({路径: 假 dll}) as loader:` —— 用完一定还原 `ctypes.WinDLL`。"""
+
+    def __init__(self, table):
+        self.loader = _FakeLoader(table)
+
+    def __enter__(self):
+        import ctypes
+        self._old = ctypes.WinDLL
+        ctypes.WinDLL = self.loader
+        return self.loader
+
+    def __exit__(self, *exc):
+        import ctypes
+        ctypes.WinDLL = self._old
+        return False
+
+
+_tmp17 = tempfile.mkdtemp(prefix="a11y_zdsr_probe_fake_")
+try:
+    f1 = os.path.join(_tmp17, "install_dir")
+    f2 = os.path.join(_tmp17, "bundled")
+    os.makedirs(f1)
+    os.makedirs(f2)
+    p1 = os.path.join(f1, "ZDSRAPI_x64.dll")      # 安装目录那份（排在前面）
+    p2 = os.path.join(f2, "ZDSRAPI_x64.dll")      # 随包兜底那份
+    for _p in (p1, p2):
+        open(_p, "wb").close()
+    #: 钉死搜索范围时给的是**目录**（`A11Y_ZDSR_DIR` 的语义），两份都要能钉进去
+    PIN = f1 + ";" + f2
+
+    # (a) 第一份版本不匹配 ⇒ 换第二份 ⇒ 可用
+    with _fake_loader({p1: _FakeDll(init_rc=1), p2: _FakeDll(init_rc=0, state=4)}) as L:
+        Z17, h17 = new_zdsr(reg_raises=True, env=PIN)
+        z17 = Z17()
+        avail17 = z17.available()
+        check("★ 第一份 InitTTS=1（版本不匹配）⇒ 自动换到第二份并握手成功",
+              avail17 is True and z17.loaded_from == p2,
+              f"available={avail17} loaded_from={z17.loaded_from}")
+        check("只按顺序加载了两份，没有反复加载 / 没有回头",
+              L.calls == [p1, p2], f"实得 {L.calls}")
+        check("第二份的 GetSpeakState 参与了判据（换完 dll 状态重新读）",
+              z17._state == 4 and z17._ok is True, f"state={z17._state} ok={z17._ok}")
+        check("日志里留下「换下一份候选重试」那一行（否则这事在日志里看不见）",
+              any("换下一份候选重试" in x for x in h17.logs), f"实得 {h17.logs}")
+
+    # (b) 只有 1 才换：其余返回码 = 「这个后端现在不可用」，换 dll 没有意义
+    with _fake_loader({p1: _FakeDll(init_rc=2), p2: _FakeDll(init_rc=0, state=4)}) as L:
+        Z17b, h17b = new_zdsr(reg_raises=True, env=PIN)
+        z17b = Z17b()
+        avail17b = z17b.available()
+        check("★ InitTTS=2（不是版本不匹配）⇒ **不换候选**，判不可用让链顺降",
+              avail17b is False and z17b.loaded_from == p1 and L.calls == [p1],
+              f"available={avail17b} loaded_from={z17b.loaded_from} calls={L.calls}")
+        check("结论是人话且带返回码", "返回 2" in z17b.reason(), f"实得 {z17b.reason()!r}")
+
+    # (c) 两份都不匹配 ⇒ 判不可用，并把「试过哪几份」写进结论
+    with _fake_loader({p1: _FakeDll(init_rc=1), p2: _FakeDll(init_rc=1)}) as L:
+        Z17c, h17c = new_zdsr(reg_raises=True, env=PIN)
+        z17c = Z17c()
+        avail17c = z17c.available()
+        check("两份都版本不匹配 ⇒ 判不可用（不抛异常）", avail17c is False)
+        check("★ 结论里列出试过的两份完整路径（能直接照着去查）",
+              "版本不匹配" in z17c.reason()
+              and p1 in z17c.reason() and p2 in z17c.reason(),
+              f"实得 {z17c.reason()!r}")
+        check("结论**没有**被次生的「GetSpeakState 调用异常」覆盖掉（0.0.1.7 的护栏）",
+              "调用异常" not in z17c.reason(), f"实得 {z17c.reason()!r}")
+        _calls_before = list(L.calls)
+        z17c.available()
+        check("限流仍然生效：紧接着再问一次不会又去加载 dll（INIT_RETRY_INTERVAL）",
+              L.calls == _calls_before, f"实得 {L.calls}")
+
+    # (d) 第一份**加载失败**（位宽不对 / 文件坏了 / 缺导出）⇒ 用第二份
+    with _fake_loader({p2: _FakeDll(init_rc=0, state=4)}) as L:
+        Z17d, _h17d = new_zdsr(reg_raises=True, env=PIN)
+        z17d = Z17d()
+        check("★ 第一份加载失败（例如位宽不对）⇒ 自动用第二份（与 Zdsr.cs 的 ProbeFrom 一致）",
+              z17d.available() is True and z17d.loaded_from == p2,
+              f"loaded_from={z17d.loaded_from}")
+
+    _no_speak = _FakeDll(init_rc=0, state=4)
+    del _no_speak.Speak
+    with _fake_loader({p1: _no_speak, p2: _FakeDll(init_rc=0, state=4)}) as L:
+        Z17e, _h17e = new_zdsr(reg_raises=True, env=PIN)
+        z17e = Z17e()
+        check("★ 第一份缺必需导出（不是争渡的 ZDSRAPI）⇒ 也换下一份",
+              z17e.available() is True and z17e.loaded_from == p2,
+              f"loaded_from={z17e.loaded_from}")
+
+    _no_braille = _FakeDll(init_rc=0, state=4, braille=False)
+    with _fake_loader({p1: _no_braille}) as L:
+        Z17f, _h17f = new_zdsr(reg_raises=True, env=f1)
+        z17f = Z17f()
+        check("Braille 导出缺失**不算**失败（1.0.0.1 那份就没有，属正常）",
+              z17f.available() is True and z17f._has_braille is False,
+              f"available={z17f.available()} has_braille={z17f._has_braille}")
+finally:
+    env_pin(None)
+    shutil.rmtree(_tmp17, ignore_errors=True)
 
 print()
 print("=" * 72)

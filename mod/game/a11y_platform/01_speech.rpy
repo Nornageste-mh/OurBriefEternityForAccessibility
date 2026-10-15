@@ -39,10 +39,11 @@ init -100 python:
         未授权时 `Speak()` 同样返回 0，拿它当判据就会重新造出
         「自称可用却一句话都不出」这个故障。
 
-        ⚠ **本机只验到哪一步（不许当成已验证）**：本机能加载 dll、`InitTTS -> 0`、
-        `GetSpeakState -> 2`、后端据此判为不可用并顺降到 SAPI。
-        **「争渡在跑时真的出声（中文往返）」本机尚未发生过** ——
-        需要维护者开着争渡按 F9 实测（`CfgModes` 里已经有 `"ZDSR"` 这一档）。
+        ⚠ **本机只验到哪一步（不许当成已验证）**：本机能加载 dll、`InitTTS -> 0`；
+        `GetSpeakState` 两次只读实测一次是 **2**（0.0.1.6 当时读屏没在跑）、
+        一次是 **4**（0.0.1.7 复查，读屏在跑）⇒ 判据成立、`available() -> True`。
+        但 **「争渡在跑时真的出声（中文往返）」本机仍然没有发生过** ——
+        那需要在游戏里按 F9 切到争渡并真听一句（`CfgModes` 里已经有 `"ZDSR"` 这一档）。
 
         ── 照抄上游、不再重新发明的三条 ────────────────────────────────────
 
@@ -870,14 +871,44 @@ init -100 python:
             同时把它算进可用 —— 那正是「版本不匹配的 dll 被报成工作正常」的写法，
             已按官方文档修正）。
 
-        ── 加载次序：官方安装目录优先（与 NVDA 那三条纪律不冲突）─────────────
+        ── 加载次序：**注册表里的真实安装目录优先**（与 NVDA 那三条纪律不冲突）──
 
         官方原文：「应用程序可以直接调用争渡读屏安装目录下的相应 dll 文件……
         **建议直接读取争渡读屏安装目录下的 dll 文件，尽量不要复制到自己程序目录**」，
         理由是 dll 随读屏升级（原文另一句：「争渡读屏 26.6 dll 文件有更新……
-        需要重新复制新的 dll 文件」）。所以候选目录第一梯队是官方安装目录；
-        第二梯队才复用 `A11yNvdaBackend._candidate_dirs()`（玩家自放 / 兼容旧行为）。
+        需要重新复制新的 dll 文件」）。
+
+        0.0.1.6 那版只找**默认安装路径**（`C:\Program Files (x86)\zdsr\zdsr` 一类），
+        于是「装在 D 盘 / 自定义目录」的玩家要自己去找 dll —— 而找不到 dll 正是
+        玩家反馈里最常见的一条。0.0.1.7 改成**先问注册表**：争渡在「卸载」项里
+        登记了 `InstallLocation`，读它就能覆盖任何安装位置：
+
+            1. 注册表 `争渡读屏 → InstallLocation`（HKLM + HKCU，32/64 位两个视图）
+               —— `DisplayName` 含「争渡」的本体排前面，只含 `zdsr` 的周边工具排后面
+               （本机实测：`ZDSR hook control v2.1.0` 也登记了 `InstallLocation`，
+               但那目录里没有 `ZDSRAPI.dll`，排后面只是省一次无谓的尝试）；
+            2. 默认安装位置 `%ProgramFiles(x86)%\zdsr\zdsr`、`%ProgramFiles%\zdsr\zdsr`、
+               `%ProgramFiles(x86)%\zdsr\zdcloud`；
+            3. 补丁自己的目录（= 随包带的那一份兜底副本）；
+            4. 游戏目录（复用 `A11yNvdaBackend._candidate_dirs()`，玩家自放的 dll 在这里）。
+
+        `A11Y_ZDSR_DIR` 一旦设置就**只找它列出的目录**（多个用 `;` 分隔）：
+        ① 排查用（把搜索范围钉死在我说的那一个目录上）；② 自检工具靠它把范围钉死，
+        否则本机真实安装会参与进来，断言就变成「碰运气」而不是「机械验证」。
         仍然**一律按绝对路径加载、不写 `__file__`** —— 理由见 NVDA 后端 `_ensure`。
+
+        ── ★ 版本不匹配（`InitTTS` 返回 1）时自动换下一份候选 ★ ─────────────
+
+        这是「随包带一份兜底副本」能成立的前提，也是它**必须**有的配套：
+        包里那份 dll 会随争渡升级而过期（官方文档自己就写着「26.6 dll 文件有更新」），
+        而**安装目录里那份才是最新的** —— 所以安装目录排在前面，正常情况下轮不到包里那份；
+        可玩家机器上千奇百怪（装到别的盘、注册表那条被清掉、机器上装了两份……），
+        所以「这一份报版本不匹配」必须能自动往下试，而不是直接判死。
+
+        判据**只有** `InitTTS == 1`（版本不匹配）。其余返回码表示
+        「这个后端现在不可用」（读屏没跑 / 没授权），换一份 dll 没有任何意义 ——
+        这一点与上游 `Zdsr.cs` 的 `EnsureInit` 逐字一致。全部候选都试完仍不匹配时，
+        把「试过哪几份」写进结论（人话），让日志能直接回答「为什么这一级不在链上」。
         """
 
         name = "ZDSR"
@@ -888,12 +919,23 @@ init -100 python:
         #: 能把真实原因写进结论，而不是含糊地说一句「找不到 dll」。
         DLL_NAMES = ("ZDSRAPI_x64.dll", "ZDSRAPI.dll")
 
-        #: 官方安装目录（官方 `ZDSRAPI.txt` 原文：「通常位于
+        #: 默认安装位置（官方 `ZDSRAPI.txt` 原文：「通常位于
         #: C:\Program Files(x86)\zdsr\zdsr 内」）。本机实测该目录存在且含 1.0.0.5。
-        OFFICIAL_DIRS = (
-            r"C:\Program Files (x86)\zdsr\zdsr",
-            r"C:\Program Files\zdsr\zdsr",
+        #: ⚠ 顺序是**先本体、后云版**：`zdcloud` 那份通常只有 32 位的 `ZDSRAPI.dll`
+        #: （本机实测如此），排在本体后面才不会「用一份只有 32 位的目录挡住 64 位那份」。
+        #: 路径由 `_default_dirs()` 用环境变量拼（非默认安装盘也能对），不写死盘符。
+        DEFAULT_SUBDIRS = (
+            ("ProgramFiles(x86)", ("zdsr", "zdsr")),
+            ("ProgramFiles", ("zdsr", "zdsr")),
+            ("ProgramFiles(x86)", ("zdsr", "zdcloud")),
         )
+
+        #: 注册表「卸载」项的路径（HKLM / HKCU 各查一遍，32 / 64 位两个视图各查一遍）。
+        UNINSTALL_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+
+        #: 别名覆盖：设了就**只找它列出的目录**（多个用 `;` 分隔）。上游 `Zdsr.cs`
+        #: 用的是同一个名字（`A11Y_ZDSR_DIR`），两边便于对照。
+        DIR_ENV = "A11Y_ZDSR_DIR"
 
         #: `GetSpeakState()` 的返回值 → 人话（逐条抄官方文档，**没有 0**）。
         STATE_WHY = {
@@ -932,53 +974,252 @@ init -100 python:
             self._state = None
             self._state_at = None
             self._state_error = None
+            #: 候选 dll 的**绝对路径**表（按优先级，见 `_candidate_paths`）。
+            self._paths = []
+            #: 当前用的是第几份候选；`InitTTS` 返回 1 时往后走（见 `_select_next_candidate`）。
+            self._index = 0
+            #: 报过「版本不匹配」的路径 —— 只用来拼人话结论，不做判据。
+            self._mismatch = []
+
+        # ------------------------------------------------ 候选目录（0.0.1.7 新增）
+        #
+        # 这一段的形状是**照上游 `Zdsr.cs` 的 `BuildCandidates` / `RegistryInstallDirs`
+        # 搭的**（那份 C# 已经在本机跑通、也是本条改动的参考实现），差别只有语言：
+        # 那边直接 P/Invoke `advapi32`，这边用标准库 `winreg`（同样是零第三方依赖）。
+
+        @staticmethod
+        def _dirs_from_registry_entries(entries):
+            r"""把注册表里的 `(DisplayName, InstallLocation)` 表变成候选目录（纯函数）。
+
+            **本体排前面**：`DisplayName` 含「争渡」的是争渡读屏本体；只含 `zdsr` 的
+            排在后面 —— 本机实测就有一条 `ZDSR hook control v2.1.0`
+            （`InstallLocation = C:\Program Files\ZDSRHook`），那类周边工具目录里
+            **没有** `ZDSRAPI.dll`，排后面只是省一次无谓的尝试，不是判据
+            （真正的判据永远是「dll 在不在、能不能加载、判据过不过」）。
+
+            `DisplayName` / `InstallLocation` 缺一个的条目**直接丢**（不猜路径）；
+            两个字段在这里 `strip`，安装目录尾部的反斜杠与可能带的引号一并去掉
+            （本机注册表里那条就是 `C:\Program Files (x86)\zdsr\zdsr\`，带尾斜杠）。
+            """
+            exact, loose = [], []
+            for disp, loc in (entries or ()):
+                try:
+                    d = (disp or "").strip()
+                    p = (loc or "").strip().strip('"').rstrip("\\/")
+                    if not d or not p:
+                        continue
+                    (exact if "争渡" in d else loose).append(p)
+                except Exception:
+                    continue
+            return exact + loose
+
+        @staticmethod
+        def _reg_value(key, winreg, name):
+            """读一个字符串值；读不到（不存在 / 不是字符串 / 出错）一律 None。"""
+            try:
+                v, _t = winreg.QueryValueEx(key, name)
+                return v if isinstance(v, str) else None
+            except Exception:
+                return None
+
+        @staticmethod
+        def _read_uninstall_branch(winreg, hive, view):
+            """扫一个 `(hive, view)` 下的「卸载」项，返回 `(DisplayName, InstallLocation)` 表。
+
+            单个条目出错只跳过它自己（`continue`），不让一条坏数据毁掉整次枚举。
+            """
+            out = []
+            try:
+                key = winreg.OpenKey(hive, A11yZdsrBackend.UNINSTALL_KEY, 0,
+                                     winreg.KEY_READ | view)
+            except Exception:
+                return out
+            try:
+                n = 0
+                while True:
+                    try:
+                        name = winreg.EnumKey(key, n)
+                    except OSError:
+                        break
+                    n += 1
+                    sub = None
+                    try:
+                        sub = winreg.OpenKey(key, name)
+                        disp = A11yZdsrBackend._reg_value(sub, winreg, "DisplayName")
+                        loc = A11yZdsrBackend._reg_value(sub, winreg, "InstallLocation")
+                        if not disp or not loc:
+                            continue
+                        # ⚠ 这里必须先按名字**收窄一遍**：卸载项里有几十条与争渡毫无关系的
+                        #   程序（本机实测 45 条：7-Zip、Git、Steam 上的一堆游戏……），
+                        #   全收进来会让候选目录表变成几十条无谓的路径。
+                        #   判据与 `Zdsr.cs` 的 `RegistryInstallDirs` 一致：
+                        #   DisplayName 含「争渡」= 本体；含 `zdsr`（不分大小写）= 可能是周边工具。
+                        if ("争渡" not in disp) and ("zdsr" not in disp.lower()):
+                            continue
+                        out.append((disp, loc))
+                    except Exception:
+                        continue
+                    finally:
+                        if sub is not None:
+                            try:
+                                winreg.CloseKey(sub)
+                            except Exception:
+                                pass
+            finally:
+                try:
+                    winreg.CloseKey(key)
+                except Exception:
+                    pass
+            return out
+
+        @staticmethod
+        def _registry_uninstall_entries():
+            r"""读注册表「卸载」项里的 `(DisplayName, InstallLocation)`。**绝不抛异常。**
+
+            四个位置各扫一遍（HKLM / HKCU × 默认视图 / 32 位视图 / 64 位视图）；
+            本机实测（2026-10-16）争渡读屏登记在
+            `HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{301A…}_is1`
+            —— 也就是「HKLM + 32 位视图」那一格，**只查 64 位视图会一条都读不到**，
+            而这一格正是「自动找到 dll」成不成立的关键，所以几格都查（与 `Zdsr.cs` 同）。
+
+            `winreg` 是标准库，补丁依旧是零第三方依赖。注册表读不到（权限、
+            被裁过的系统、非 Windows）只是「没有候选目录」，**不该成为故障源** ——
+            所以整段包 `try`，异常一律吞掉，返回空表。
+            """
+            out = []
+            try:
+                import winreg
+            except Exception:
+                return out
+            try:
+                views = [0]
+                for name in ("KEY_WOW64_64KEY", "KEY_WOW64_32KEY"):
+                    v = getattr(winreg, name, None)
+                    if v:
+                        views.append(v)
+                for hive in (getattr(winreg, "HKEY_LOCAL_MACHINE", None),
+                             getattr(winreg, "HKEY_CURRENT_USER", None)):
+                    if hive is None:
+                        continue
+                    for view in views:
+                        out.extend(A11yZdsrBackend._read_uninstall_branch(
+                            winreg, hive, view))
+            except Exception:
+                return out
+            return out
+
+        @staticmethod
+        def _registry_dirs():
+            """注册表里登记的争渡安装目录（读不到就是空表，**不抛异常**）。"""
+            return A11yZdsrBackend._dirs_from_registry_entries(
+                A11yZdsrBackend._registry_uninstall_entries())
+
+        @staticmethod
+        def _default_dirs():
+            r"""默认安装位置（`%ProgramFiles(x86)%\zdsr\zdsr` 等三条，见 `DEFAULT_SUBDIRS`）。
+
+            ⚠ 用环境变量拼、**不写死盘符**：非默认安装盘上（系统盘不是 C:）官方那个
+            `C:\Program Files (x86)` 是错的。环境变量读不到时才退回字面量 ——
+            退回只是为了「至少试一次」，真正的覆盖靠上面那条注册表。
+            """
+            import os
+            out = []
+            for ev, parts in A11yZdsrBackend.DEFAULT_SUBDIRS:
+                base = None
+                try:
+                    base = os.environ.get(ev)
+                except Exception:
+                    base = None
+                if not base and ev == "ProgramFiles(x86)":
+                    base = r"C:\Program Files (x86)"
+                if not base and ev == "ProgramFiles":
+                    base = r"C:\Program Files"
+                if base:
+                    out.append(os.path.join(base, *parts))
+            return out
 
         @staticmethod
         def _candidate_dirs():
-            r"""dll 候选目录，按优先级（官方安装目录优先，理由见类文档）。"""
+            r"""dll 候选目录，按优先级（理由见类文档）：
+
+                1. 注册表里登记的实际安装目录（`争渡读屏 → InstallLocation`）
+                2. 默认安装位置（`%ProgramFiles(x86)%\zdsr\zdsr` 等）
+                3. 补丁自己的目录（= 随包带的那份兜底副本）
+                4. 游戏目录（玩家自放的 dll）
+
+            `A11Y_ZDSR_DIR` 一旦设置就**只找它列出的目录**（多个用 `;` 分隔）——
+            钉死模式存在的理由是自检：本机真实安装参与进来的话，
+            「候选顺序」这类断言就变成碰运气，而不是机械验证。
+            """
             import os
-            dirs = list(A11yZdsrBackend.OFFICIAL_DIRS)
-            # 非默认安装盘：官方只给了默认位置，这里用环境变量把同一路径再拼一遍
-            for ev in ("ProgramFiles(x86)", "ProgramFiles", "ProgramW6432"):
-                base = os.environ.get(ev)
-                if base:
-                    dirs.append(os.path.join(base, "zdsr", "zdsr"))
+            pinned = None
+            try:
+                pinned = os.environ.get(A11yZdsrBackend.DIR_ENV)
+            except Exception:
+                pinned = None
+            if pinned:
+                out = []
+                for one in pinned.split(";"):
+                    d = one.strip().strip('"')
+                    if d and d not in out:
+                        out.append(d)
+                return out
+
+            dirs = []
+            try:
+                dirs.extend(A11yZdsrBackend._registry_dirs())
+            except Exception:
+                pass
+            try:
+                dirs.extend(A11yZdsrBackend._default_dirs())
+            except Exception:
+                pass
             try:
                 dirs.extend(A11yNvdaBackend._candidate_dirs())
             except Exception:
                 pass
+
             out = []
+            seen = set()
             for d in dirs:
-                if d and d not in out:
+                if not d:
+                    continue
+                key = d.rstrip("\\/").lower()      # Windows 路径大小写不敏感
+                if key and key not in seen:
+                    seen.add(key)
                     out.append(d)
             return out
 
-        def _find_dll(self):
-            """找 dll：**先在所有候选目录里找 64 位那一份**，找不到才退而找 32 位那份。
+        @staticmethod
+        def _candidate_paths():
+            r"""候选 dll 的**绝对路径**表，按优先级。
 
-            （按目录逐个试两个名字是不对的：那会让「官方目录里只有 32 位那份」挡住了
-            后面目录里可用的 64 位那份 —— 进程是 64 位，加载 32 位 dll 必然失败。）
+            ⚠ 顺序是**文件名优先**：先在所有候选目录里找 64 位那一份，
+            找不到才退而找 32 位那份。按目录逐个试两个名字是不对的 ——
+            那会让「某个目录里只有 32 位那份」挡住后面目录里可用的 64 位那份
+            （进程是 64 位，加载 32 位 dll 必然失败：`OSError [WinError 193]`）。
             """
             import os
-            for n in self.DLL_NAMES:
-                for d in self._candidate_dirs():
+            out = []
+            # 候选目录只算一次：`_candidate_dirs()` 会读注册表（本机实测约 17ms），
+            # 每个文件名各算一遍就是白读一遍。
+            dirs = A11yZdsrBackend._candidate_dirs()
+            for n in A11yZdsrBackend.DLL_NAMES:
+                for d in dirs:
                     p = os.path.join(d, n)
-                    if os.path.exists(p):
-                        return p
-            return None
+                    try:
+                        if os.path.exists(p) and p not in out:
+                            out.append(p)
+                    except Exception:
+                        continue
+            return out
 
-        def _ensure(self):
-            """加载 dll 并绑定导出。幂等。范式与理由见 `A11yNvdaBackend._ensure`。"""
+        # ------------------------------------------------ 加载 / 换候选 / 握手
+
+        def _load_at(self, index):
+            """加载第 `index` 份候选并绑定导出；失败返回 False，原因写进 `_load_error`。"""
             import ctypes
-            if self._lib is not None or self._tried:
-                return self._lib is not None
-            self._tried = True
-
-            path = self._find_dll()
-            if path is None:
-                self._load_error = "未找到 ZDSRAPI_x64.dll（争渡读屏未安装？）"
-                return False
-
+            path = self._paths[index]
             try:
                 lib = ctypes.WinDLL(path)
                 # ★ 四个必需导出逐个绑定 —— 名字写错/缺失会在这里当场抛 AttributeError，
@@ -997,15 +1238,78 @@ init -100 python:
                 try:
                     lib.Braille.argtypes = [ctypes.c_wchar_p, ctypes.c_bool]
                     lib.Braille.restype = ctypes.c_int
-                    self._has_braille = True
+                    has_braille = True
                 except AttributeError:
-                    self._has_braille = False
-                self._lib = lib
-                self.loaded_from = path
-                return True
+                    has_braille = False
             except Exception as e:
-                self._load_error = "%s: %s" % (type(e).__name__, e)
+                self._load_error = "%s：%s: %s" % (path, type(e).__name__, e)
                 return False
+            self._lib = lib
+            self._index = index
+            self.loaded_from = path
+            self._has_braille = has_braille
+            return True
+
+        def _unload(self):
+            r"""卸掉当前这份 dll（换候选时用）。
+
+            `ctypes` **自己不会卸载**（`CDLL` 没有 `__del__`，本机 CPython 3.13 实查），
+            所以这里显式 `FreeLibrary` —— 与上游 `Zdsr.cs` 的 `SelectNextCandidate` 同形。
+            卸不掉也不影响正确性：整段包 `try`，失败就往下走。
+            """
+            lib = self._lib
+            self._lib = None
+            self._handshake_ok = False
+            self._state = None
+            self._state_at = None
+            self._state_error = None
+            self._ok = False
+            h = getattr(lib, "_handle", None)
+            if not h:
+                return
+            try:
+                import ctypes
+                ctypes.windll.kernel32.FreeLibrary(ctypes.c_void_p(h))
+            except Exception:
+                pass
+
+        def _select_next_candidate(self):
+            r"""换下一份候选 dll（**只在 `InitTTS` 返回 1 时**调用，理由见类文档）。
+
+            返回 True = 后面某一份已经加载上；False = 后面没有了，
+            或者后面几份都加载不上（`_load_error` 里是最后一份的失败原因）。
+            """
+            if not self._paths:
+                return False
+            nxt = self._index + 1
+            if nxt >= len(self._paths):
+                return False
+            self._unload()
+            for i in range(nxt, len(self._paths)):
+                if self._load_at(i):
+                    return True
+            return False
+
+        def _ensure(self):
+            """加载 dll 并绑定导出。幂等。范式与理由见 `A11yNvdaBackend._ensure`。
+
+            ⚠ 某一份加载失败**会继续试下一份**（与上游 `Zdsr.cs` 的 `ProbeFrom` 一致）：
+            「包里那份是坏的 / 位宽装错了」不该挡住安装目录里那份可用的，反之亦然。
+            """
+            if self._lib is not None:
+                return True
+            if self._tried:
+                return False
+            self._tried = True
+
+            self._paths = self._candidate_paths()
+            if not self._paths:
+                self._load_error = "未找到 ZDSRAPI_x64.dll（争渡读屏未安装？）"
+                return False
+            for i in range(len(self._paths)):
+                if self._load_at(i):
+                    return True
+            return False
 
         def _handshake(self):
             r"""与读屏握手一次：`InitTTS(0, None, False)`。成功一次后不再重复。
@@ -1028,6 +1332,20 @@ init -100 python:
             这类行 —— 它**不是**本补丁的日志（本补丁的日志一律带 `[A11y]` 前缀），
             排查时别把它当成我们打印的东西。`INIT_RETRY_INTERVAL` 那条限流同时也是
             为了不让这种行刷屏。
+
+            ── ★ `rc == 1`（版本不匹配）时换下一份候选 ★ ──────────────────────
+
+            与上游 `Zdsr.cs` 的 `EnsureInit` 逐字同形：**只有 `1` 会换候选**。
+            官方文档里 `InitTTS` 只有两个返回值（`0 成功 / 1 版本不匹配`），
+            `0` 在上面就返回 True 了；所以走到这条判断的要么是 `1`，要么是文档之外的值 ——
+            后者一律按「这个后端现在不可用」处理，换一份 dll 没有任何意义，
+            直接判不可用、让 `A11ySpeech` 顺降到下一级。
+
+            `rc == 1` 的含义是「这份 dll 与玩家机器上的争渡对不上」。两种情形都要能活：
+            **包里那份太旧**（官方文档自己写着 26.6 更新过 dll）⇒ 换到安装目录那份；
+            **安装目录那份是坏的/对不上**（装了两份、升级到一半）⇒ 换回包里那份。
+            全部候选都试完仍不匹配时，把「试过哪几份」写进结论 ——
+            `reason()` 那一行是排查「为什么这一级不在链上」的唯一线索。
             """
             import time
             if self._handshake_ok:
@@ -1037,23 +1355,38 @@ init -100 python:
                     (now - self._init_tried_at) < self.INIT_RETRY_INTERVAL:
                 return False
             self._init_tried_at = now
-            try:
-                self._init_rc = self._lib.InitTTS(0, None, False)
-            except Exception as e:
-                self._init_rc = None
-                self._init_why = "InitTTS 调用异常 %s: %s" % (type(e).__name__, e)
-                self._why = self._init_why
-                A11yHost.log("ZDSR " + self._init_why)
-                return False
-            rc = self._init_rc
-            if rc == 0:
-                self._handshake_ok = True
-                A11yHost.log("ZDSR InitTTS(0=读屏通道, NULL, 按键不打断) -> 0")
-                return True
-            self._init_why = "InitTTS 返回 %d（%s）" % (rc, self.INIT_WHY.get(rc, "未知"))
-            self._why = self._init_why
-            A11yHost.log("ZDSR " + self._init_why)
-            return False
+
+            while True:
+                try:
+                    self._init_rc = self._lib.InitTTS(0, None, False)
+                except Exception as e:
+                    self._init_rc = None
+                    self._init_why = "InitTTS 调用异常 %s: %s" % (type(e).__name__, e)
+                    self._why = self._init_why
+                    A11yHost.log("ZDSR " + self._init_why)
+                    return False
+                rc = self._init_rc
+                if rc == 0:
+                    self._handshake_ok = True
+                    A11yHost.log("ZDSR InitTTS(0=读屏通道, NULL, 按键不打断) -> 0")
+                    return True
+                self._init_why = "InitTTS 返回 %d（%s）" % (rc, self.INIT_WHY.get(rc, "未知"))
+                if rc != 1:
+                    self._why = self._init_why
+                    A11yHost.log("ZDSR " + self._init_why)
+                    return False
+                # rc == 1：这一份与读屏对不上 —— 记下来，换下一份候选再握手
+                if self.loaded_from and self.loaded_from not in self._mismatch:
+                    self._mismatch.append(self.loaded_from)
+                if not self._select_next_candidate():
+                    self._init_why = (
+                        "InitTTS 返回 1（版本不匹配），%d 份候选 dll 全试过都不匹配：%s"
+                        % (len(self._mismatch), "、".join(self._mismatch)))
+                    self._why = self._init_why
+                    A11yHost.log("ZDSR " + self._init_why)
+                    return False
+                A11yHost.log("ZDSR InitTTS 返回 1（版本不匹配），换下一份候选重试：%s"
+                             % self.loaded_from)
 
         def _read_state(self):
             """问一次 `GetSpeakState()`（**判据的唯一来源**），记下时间戳与结论。
@@ -1083,8 +1416,11 @@ init -100 python:
             if not self._ensure():
                 self._why = self._load_error or "加载失败"
                 return
-            self._handshake()
-            if self._state_at is None:
+            if self._handshake() and self._state_at is None:
+                # ⚠ 只在**握手成功**之后读状态（0.0.1.7 起的护栏）：握手以
+                # 「版本不匹配，候选都试完了」收场时，再读一次状态只会把那条
+                # 更值钱的结论覆盖成「GetSpeakState 调用异常 / 未知返回码」——
+                # 那是**换候选之后**的次生现象，不是原因。
                 self._read_state()
             A11yHost.log("ZDSR: dll=%s 盲文导出=%s 结论=%s" % (
                 self.loaded_from,
@@ -1116,9 +1452,13 @@ init -100 python:
             「后端结论」那一行日志就会被打断，而那一行正是排查「为什么全灭」的唯一
             线索。整段包 `try` 之外还有一条纪律：**这里不做任何跨进程调用**，
             只读缓存下来的字符串（状态由 `available()` 负责刷新）。
+
+            `_why` 一旦被写成结论就**优先于** `_load_error` 返回：0.0.1.7 起
+            「所有候选都版本不匹配」这条结论比「最后一份加载失败」更接近真相
+            （那条路径换候选时会先 `_unload()`，`_lib` 因此可能是 None）。
             """
             try:
-                if self._lib is None:
+                if self._lib is None and self._why == "未初始化":
                     return self._load_error or "未初始化"
                 return self._why
             except Exception as e:

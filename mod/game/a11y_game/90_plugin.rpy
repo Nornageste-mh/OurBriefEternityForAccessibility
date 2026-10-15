@@ -15,15 +15,18 @@ init -190 python:
     # 元信息
     A11yHost.GameName = "永恒与星辰与日常"
     A11yHost.GameVersion = "1.63"        # 依据：scripts/options.rpy 的 config.version 实查
-    A11yHost.PatchVersion = "0.0.1.6"
+    A11yHost.PatchVersion = "0.0.1.7"
 
     # 后端：空 = 自动（NVDA -> ZDSR -> SAPI(引擎同款)）。
     # ⚠ 0.0.1.6 起 ZDSR（争渡读屏）**已接入链上第三级**（旧注释写着「按维护者决定
     #   不适配」，那条立场已按实测改掉，依据见 `a11y_platform/01_speech.rpy` 的
     #   `A11yZdsrBackend`）。判据是官方的 `GetSpeakState() in (3, 4)`：
-    #   本机实测 `InitTTS` 返回 0 而 `GetSpeakState` 返回 2（读屏没有运行或没有授权）
-    #   ⇒ 本机后端结论里 ZDSR 会显示为不可用并顺降，这不影响 NVDA 与 SAPI 两级。
+    #   本机实测 `InitTTS` 返回 0、`GetSpeakState` 返回 4（在跑）⇒ 判据成立。
     #   ⚠ 「争渡在跑时真的出声（中文往返）」本机尚未实测 —— 不当成已验证可用。
+    # ⚠ 0.0.1.7 起那一级**自己找 dll**：注册表 `争渡读屏 → InstallLocation` →
+    #   默认安装位置 → 补丁自己的目录 → 游戏目录；`A11Y_ZDSR_DIR` 可钉死
+    #   （多个目录用 `;` 分隔）。某一份报版本不匹配（`InitTTS` 返回 1）时
+    #   自动换下一份 —— 随包那份与安装目录那份互为兜底。
     A11yHost.CfgSpeechBackend = ""
 
     # 朗读诊断日志：默认关闭 —— 打开后 log.txt 会出现剧本原文，

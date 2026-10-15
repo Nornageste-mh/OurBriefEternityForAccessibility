@@ -7,23 +7,53 @@
 1. 本包分发了什么第三方二进制
 --------------------------------------------------------------------------------
 
-只有一个：nvdaControllerClient64.dll
+三个：
 
-  * 组件：NVDA Controller Client（供第三方程序调用 NVDA 朗读）
-  * 版权：© NV Access Limited 及 NVDA 贡献者
-  * 许可：GNU LGPL v2.1
-  * 上游：<https://github.com/nvaccess/nvda> → extras/controllerClient/
+  (1) nvdaControllerClient64.dll
 
-它是**未经修改**的独立动态库：本包只做原样复制，没有改过它的任何字节
-（可自行用上游源码编译后逐字节对比）。
+      * 组件：NVDA Controller Client（供第三方程序调用 NVDA 朗读）
+      * 版权：© NV Access Limited 及 NVDA 贡献者
+      * 许可：GNU LGPL v2.1
+      * 上游：<https://github.com/nvaccess/nvda> → extras/controllerClient/
 
-补丁只依赖它的三个导出函数：
+      它是**未经修改**的独立动态库：本包只做原样复制，没有改过它的任何字节
+      （可自行用上游源码编译后逐字节对比）。
 
-    nvdaController_testIfRunning
-    nvdaController_speakText
-    nvdaController_cancelSpeech
+      补丁只依赖它的三个导出函数：
 
-因此你可以用**同版本或兼容版本**的同名 DLL 替换本包里的这一份，补丁仍然工作。
+          nvdaController_testIfRunning
+          nvdaController_speakText
+          nvdaController_cancelSpeech
+
+      因此你可以用**同版本或兼容版本**的同名 DLL 替换本包里的这一份，
+      补丁仍然工作。
+
+  (2) ZDSRAPI_x64.dll   争渡读屏 API 库（64 位）
+  (3) ZDSRAPI.dll       争渡读屏 API 库（32 位）
+
+      * 组件：争渡读屏（ZDSR）的应用程序接口库
+      * 版权：© 争渡读屏（ZDSR）及其作者
+      * 立场：随**本免费补丁非商业**分发，**未经任何修改**（逐字节原样复制）
+      * 来源：打包机器上**已安装的争渡读屏安装目录**
+        （先读注册表登记的 InstallLocation，再试默认安装位置）
+      * 官方依据：随争渡分发的 `ZDSRAPI.txt` 写明「应用程序可以直接调用争渡
+        读屏安装目录下的相应 dll 文件，**或者直接把 dll 复制到指定的目录调用
+        均可**」
+
+      补丁只依赖它的四个导出函数（`Braille` 可选）：
+
+          InitTTS
+          Speak
+          GetSpeakState
+          StopSpeak
+
+      运行时**安装目录那份优先**（它跟着读屏一起升级）；包里这两份是**兜底
+      副本**，只在机器上找不到可用安装目录时才用到。某一份报「版本不匹配」时
+      补丁会自动换下一份。**删掉包里这两个文件不会让补丁坏掉** —— 只是回到
+      「用安装目录那份」。
+
+      ⚠ 本包**故意不带** `ZDSRAPI.ini`：那是玩家自己的通道 / 音色配置，
+      放进游戏目录会**覆盖**玩家调好的设置。
 
 逐项声明见同目录的 THIRD-PARTY-NOTICES.txt。
 
@@ -31,7 +61,8 @@
 2. 完整的 LGPL v2.1 文本从哪里取得
 --------------------------------------------------------------------------------
 
-本包**不含** LGPL 全文 —— 它与上游逐字一致，收进包里不增加任何信息。
+本包**不含** LGPL 全文（它只适用于上面第 (1) 项 NVDA 客户端；争渡那两份 API 库
+不是 LGPL 组件）—— 它与上游逐字一致，收进包里不增加任何信息。
 需要完整许可证文本时，请从这里取得：
 
   纯文本：https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
@@ -43,8 +74,13 @@
 3. 需要源码 / 想自己编译
 --------------------------------------------------------------------------------
 
-上游源码在 NVDA 仓库的 extras/controllerClient/ 目录下，按该目录里的说明
-用 Visual Studio 即可编译出同名的 DLL。
+NVDA 客户端：上游源码在 NVDA 仓库的 extras/controllerClient/ 目录下，
+按该目录里的说明用 Visual Studio 即可编译出同名的 DLL。
+
+争渡读屏 API 库：**不是开源组件**，源码不公开 —— 本包分发的是争渡自己随
+读屏安装分发的二进制文件，原样复制、未作修改。需要最新版本时，
+请从你自己的争渡读屏安装目录里取（`ZDSRAPI_x64.dll` / `ZDSRAPI.dll`），
+补丁会自动优先使用那一份。
 
 --------------------------------------------------------------------------------
 4. 范围说明
