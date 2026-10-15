@@ -93,31 +93,43 @@ def try_zdsr(speak: bool) -> str:
 
     try:
         lib = ctypes.WinDLL(dll)
+        # ★ 官方 ZDSRAPI.txt 的签名是**三参**：
+        #     int WINAPI InitTTS(int type, const WCHAR* channelName, BOOL bKeyDownInterrupt)
+        #   type=0（读屏通道）时 channelName 官方要求传 **NULL**（不是 ""）。
+        #   旧版这里写成两参 init("", "")：平 API 下多余/缺失实参会被忽略，
+        #   它照样返回 0 —— 于是错误被掩盖，**不要照那种写法写进游戏**。
         init = lib.InitTTS
-        init.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+        init.argtypes = [ctypes.c_int, ctypes.c_wchar_p, ctypes.c_bool]
         init.restype = ctypes.c_int
         speak_fn = lib.Speak
         speak_fn.argtypes = [ctypes.c_wchar_p, ctypes.c_bool]
         speak_fn.restype = ctypes.c_int
         state = lib.GetSpeakState
+        state.argtypes = []
         state.restype = ctypes.c_int
         stop = lib.StopSpeak
-        stop.restype = ctypes.c_int
+        stop.argtypes = []
+        stop.restype = None          # 官方：void WINAPI StopSpeak()
     except Exception as e:  # noqa: BLE001
         print(f"  [失败] 加载/取符号: {type(e).__name__}: {e}")
         return "error"
 
-    rc_init = init("", "")
-    print(f"  InitTTS(...) -> {rc_init}   (0=成功/已初始化, 1=失败, 3=同进程已初始化)")
+    rc_init = init(0, None, False)
+    print(f"  InitTTS(0, NULL, False) -> {rc_init}   (0=成功, 1=版本不匹配)")
 
-    # ★ 判据是 GetSpeakState，不是 InitTTS 的返回值
+    # ★ 判据是 GetSpeakState，不是 InitTTS 的返回值 —— InitTTS 返回 0 只说明
+    #   「版本对得上」，读屏没在跑时它**也是 0**（本机实测 rc=0 而 state=2）。
     rc_state = state()
-    state_meaning = {0: "未初始化", 1: "就绪", 2: "读屏没有运行或没有授权",
-                     3: "正在朗读", 4: "朗读暂停"}.get(rc_state, "未知")
+    state_meaning = {1: "版本不匹配", 2: "读屏没有运行或没有授权",
+                     3: "正在朗读", 4: "没有朗读", 8: "命令没有成功送达",
+                     9: "独立通道尚未就绪"}.get(rc_state, "未知")
     print(f"  GetSpeakState() -> {rc_state}   ({state_meaning})")
 
-    usable = rc_state in (1, 3, 4)
-    print(f"  判据: rc_state in (1,3,4) -> {usable}")
+    # ★ 只有 3/4 算可用。旧版写成 `in (1, 3, 4)` 并把 1 讲成「就绪」——
+    #   那会把**版本不匹配**的 dll 报成工作正常（1 的官方含义是「版本不匹配」，
+    #   文档里也没有 0 这个返回值）。这正是本项目最忌讳的「自称可用却一句话都不出」。
+    usable = rc_state in (3, 4)
+    print(f"  判据: rc_state in (3,4) -> {usable}")
 
     if not usable:
         print("  => 争渡这一级不可用，应按流水线**顺降到 SAPI/NVDA**，"

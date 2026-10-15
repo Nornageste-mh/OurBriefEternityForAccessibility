@@ -320,10 +320,14 @@ init -50 python:
             # 3) 后端链
             try:
                 A11yHost.speech.init()
-                # ⚠ 模式必须在 `init()` **之后**设：`set_mode` 会用已注册后端名
+                # ⚠ 模式必须在 `init()` **之后**定：`set_mode` 会用已注册后端名
                 #   做白名单核对（拼错的配置名不能让补丁整局哑掉），
                 #   而那份白名单是 `init()` -> `register_builtin()` 填的。
-                A11yHost.speech.set_mode(A11yHost.CfgSpeechBackend)
+                # `boot_mode()` 而不是直接用 `CfgSpeechBackend`：优先级是
+                #   **配置里写死的档位 > 玩家上次按键选的那一档 > 自动**
+                #   —— 玩家的选择存在引擎的 persistent 里（`A11ySpeech.cycle_backend`
+                #   落盘），否则他每开一次游戏都得重按一遍后端切换键。
+                A11yHost.speech.boot_mode()
             except Exception:
                 A11yHost.log_exc("后端链初始化失败")
 

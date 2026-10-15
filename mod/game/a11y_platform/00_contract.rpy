@@ -31,7 +31,13 @@ init -200 python:
         PatchVersion = ""
 
         # ------------------------------------------------------------ 配置（由逐作层填）
-        #: 朗读后端："" = 自动（NVDA -> SAPI）；也可钉死成 "NVDA" / "SAPI(引擎同款)"（排查用）
+        #: 朗读后端："" = 自动（NVDA -> ZDSR -> SAPI）；
+        #: 也可钉死成 "NVDA" / "ZDSR" / "SAPI(引擎同款)"（排查用）。
+        #: ⚠ 钉死的档位**不可用也不回退** —— 拼错的名字会被 `A11ySpeech.set_mode()`
+        #: 按「已注册后端名」核对后退回自动，不会让补丁整局哑掉。
+        #:
+        #: ⚠ 这里是**排查用的写死档**，它压得过「玩家按切换键留下的记忆」
+        #: （优先级与理由见 `A11ySpeech.boot_mode()`）。
         CfgSpeechBackend = ""
 
         #: 朗读诊断日志：写进 log.txt。**默认关闭** —— 打开时 log.txt 里会出现剧本原文，
@@ -71,6 +77,20 @@ init -200 python:
         #: （已占：F1 帮助 / F2 进度 / F3 性能 / F4 图像日志 / F7 内存 / F8 单次 profile /
         #: F11 全屏）。仍走 Ren'Py 的 keymap，玩家能在引擎设置里改。
         CfgRereadKey = ["K_F5"]
+
+        #: 朗读后端切换键的默认绑定（**支持修饰键写法**）。
+        #:
+        #:     ["K_F9"]            # 引擎写法 —— 默认，就是 F9
+        #:     ["Alt+Shift+F9"]    # 人话写法，等价于引擎的 "alt_shift_K_F9"
+        #:     ["ctrl_shift_K_r"]  # 引擎写法原样透传
+        #:
+        #: 为什么要支持 `Alt+Shift+F9` 这种写法：F9 在本作里无人占用（实测占用表见
+        #: `a11y_platform/06_keymap.rpy` 的文件头），但**玩家的机器上可能别的东西
+        #: 占着它** —— 读屏软件自己的快捷键、输入法、显卡驱动、其它补丁都会抢。
+        #: 让人去记引擎的 `alt_shift_K_F9` 拼法等于把这个配置项藏起来：写不出来
+        #: 就等于没得改。写法转换只做加法，判不了的原样交给引擎自己判
+        #: （见 `06_keymap.rpy` 的 `_A11yKeySpec`）。
+        CfgBackendCycleKey = ["K_F9"]
 
         #: 逐作层的「这一句念什么」钩子，签名 `(who, what) -> str`。
         #: 返回 None 或空串表示不朗读这一条。
@@ -148,6 +168,52 @@ init -200 python:
 
         #: 舞台标识，随每台机器的存档走，方便排查
         stage = ""
+
+        # ------------------------------------------------------------ 跨启动记忆
+        # 引擎侧就是 `renpy.game.persistent`（`renpy/main.py:439` 建、`:474`
+        # 挂到 store 上，两处都**早于** `main.py:488` 的 init 块执行 ⇒ init 阶段
+        # 读写都成立）。为什么要平台层自己封一层：
+        #   · 平台层不许直接碰引擎（本文件是唯一接口），而且探针要能把「记忆」
+        #     换成假的（`tools/probe_speech.py` 的 FakeHost 就是这么做的）；
+        #   · `Persistent.__getattr__` 对**未定义**的属性返回 None 而不是抛异常
+        #     （`renpy/persistent.py:67-71` 实查），所以「没记过」与「记成 None」
+        #     在引擎那一侧长得一样 —— 统一在这里归一成 default，别让每个调用方各判一次。
+
+        @staticmethod
+        def recall(key, default=None):
+            """读一条**跨启动**记住的设置（引擎的 persistent 存档）。
+
+            为什么需要它：后端切换键切出来的档位是「这台机器上哪条路好使」的判断，
+            玩家不该每开一次游戏就重做一遍 —— 盲人玩家做一次这样的循环成本极高。
+            读不到（没记过 / 引擎那一层不可用）一律返回 `default`，绝不抛。
+            """
+            try:
+                import renpy.game as _g
+                p = getattr(_g, "persistent", None)
+                if p is None:
+                    return default
+                v = getattr(p, key, None)
+                return default if v is None else v
+            except Exception:
+                return default
+
+        @staticmethod
+        def remember(key, value):
+            """写一条跨启动的设置。返回是否写成功。**失败也不抛**。
+
+            写不进去只影响「下次启动记不记得住」，不该影响这一局能不能玩 ——
+            而它是在按键处理函数里被调用的，抛出去会把后面的播报一起吃掉
+            （那个故障形态见 `CfgKeyCue` 的长注释）。
+            """
+            try:
+                import renpy.game as _g
+                p = getattr(_g, "persistent", None)
+                if p is None:
+                    return False
+                setattr(p, key, value)
+                return True
+            except Exception:
+                return False
 
         # ------------------------------------------------------------ 日志
         _logs = []

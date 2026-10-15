@@ -44,6 +44,11 @@
 #       数字 1-9 选项直选（主键盘 + 小键盘）/ 方向键 ↑↓ 线性导航（左右留给滑杆与视口）
 #     F6 / F12 空着（F6 曾用于「界面导航模式」，该模式已删除，见 CHANGELOG 0.0.0.5）。
 #
+#   ⚠ 两个键**可以由逐作层改**（改的是「补丁自己的键名」，不是引擎的原生键）：
+#       `CfgRereadKey`（重读）与 `CfgBackendCycleKey`（后端切换，默认 F9）。
+#     两者都支持修饰键写法（`"Alt+Shift+F9"` -> 引擎的 `alt_shift_K_F9`），
+#     转换见 `_A11yKeySpec` —— 玩家机器上 F9 被别的东西占着时，这是他唯一的出路。
+#
 # ⚠ 与维护者其它无障碍仓库的差异（必须写进 README，不能默默不同）：其它仓库的重读键
 #   默认是 `Backspace`，本作**不能用它** —— 引擎把它给了文本输入，而本作确实有文本
 #   输入界面（`scripts/screens/screen_input.rpy` 实查）。上游纪律：**不抢原生占用的键**。
@@ -106,6 +111,118 @@ init 1200 python:
         return ok
 
 
+    #: 修饰键的**人话写法** -> Ren'Py keymap 的修饰词。
+    #:
+    #: 引擎认的修饰词只有这几个（`renpy/display/behavior.py:69-86` 的 MODIFIERS
+    #: 集合，实查）：`keydown / keyup / repeat / alt / meta / shift / noshift / ctrl /
+    #: osctrl / caps / nocaps / num / nonum / any / anyrepeat / anymod`。
+    #: `win` / `super` / `cmd` 都是**玩家嘴里的叫法**，统一映射到引擎的 `meta`
+    #: （pygame 的 `KMOD_META` 就是 Windows 键 / Command 键）。
+    _A11Y_MOD_ALIASES = {
+        "alt": "alt", "shift": "shift",
+        "ctrl": "ctrl", "control": "ctrl",
+        "meta": "meta", "win": "meta", "super": "meta", "cmd": "meta",
+        "command": "meta",
+    }
+
+    #: 键名的**人话写法** -> 引擎的 pygame 常量名。只列**确定存在**的那些
+    #: （本机用游戏自带运行时 `dir(renpy.pygame)` 实查：
+    #: 字母只有小写 `K_a`..`K_z`（**没有 `K_A`**）、F 键是 `K_F1`..`K_F24`、
+    #: 数字是 `K_0`..`K_9`、命名键都是大写 `K_RETURN` 这种）。
+    _A11Y_KEY_ALIASES = {
+        "return": "K_RETURN", "enter": "K_RETURN",
+        "esc": "K_ESCAPE", "escape": "K_ESCAPE",
+        "space": "K_SPACE", "tab": "K_TAB", "backspace": "K_BACKSPACE",
+        "delete": "K_DELETE", "del": "K_DELETE",
+        "insert": "K_INSERT", "ins": "K_INSERT",
+        "home": "K_HOME", "end": "K_END",
+        "pageup": "K_PAGEUP", "pagedown": "K_PAGEDOWN",
+        "up": "K_UP", "down": "K_DOWN", "left": "K_LEFT", "right": "K_RIGHT",
+    }
+
+
+    def _A11yKeySpec(raw):
+        r"""把一条**人话键名**转成 Ren'Py 的 keymap 键名。判不了就**原样返回**。
+
+        为什么要有它：引擎的键名是**下划线**拼的（`alt_shift_K_F9`），而人脑子里想的是
+        `Alt+Shift+F9`。让人去记引擎的拼法等于把这个配置项藏起来 —— 写不出来就等于
+        没得改，而「按键冲突时能换一个」正是这个配置项存在的唯一理由。
+        所以两种写法都收：
+
+            "Alt+Shift+F9"   -> "alt_shift_K_F9"
+            "F9"             -> "K_F9"
+            "Ctrl+R"         -> "ctrl_K_r"            （引擎里字母只有小写那份）
+            "K_F9"           -> "K_F9"                （引擎写法原样透传）
+            "ctrl_shift_K_r" -> "ctrl_shift_K_r"
+            "Hyper+F9"       -> "Hyper+F9"            （不认识就不当裁判）
+
+        ⚠ 两条纪律：
+
+        1. **不认识的修饰键或键名一律原样返回**，交给 `_A11yValidSpecs` 用**引擎自己的**
+           `compile_event` 判。在这里自己当裁判的两种下场都是已经发生过的事故：
+           判宽了 ⇒ `config.keymap` 里塞进引擎不认识的名字 ⇒ `behavior.py:211` 的
+           `getattr(pygame.constants, key)` 抛 AttributeError ⇒ **游戏完全起不来**；
+           判严了 ⇒ 玩家的键被静默丢弃 ⇒ 那个键**永远不响**（F5 那次）。
+        2. **修饰词的先后顺序无意义**（`behavior.py:89-92` 是把前缀逐个 pop 进一个
+           set），所以 `Alt+Shift+F9` 与 `Shift+Alt+F9` 等价 —— 这里不为顺序做归一，
+           免得让读代码的人以为顺序有讲究。
+
+        ⚠ 数字键**不走这个函数**：`"1"`（引擎按 `ev.unicode` 判）与 `K_1`（按物理键判）
+        是两条不同的判据，转换会**改变语义**。所以 `A11yChoiceDigit*` 那九组照旧
+        直接用 `"1"` / `"K_KP1"` 两种写法，一个字都不动。
+        """
+        s = (raw or "").strip()
+        if not s:
+            return s
+        parts = [p.strip() for p in s.split("+") if p.strip()]
+        if not parts:
+            return s
+        mods, key = parts[:-1], parts[-1]
+
+        out_mods = []
+        for m in mods:
+            mm = _A11Y_MOD_ALIASES.get(m.lower())
+            if mm is None:
+                return s                    # 不认识的修饰键：整条交回引擎判
+            if mm not in out_mods:
+                out_mods.append(mm)
+
+        name = key
+        if not name.startswith("K_"):
+            low = name.lower()
+            if low in _A11Y_KEY_ALIASES:
+                name = _A11Y_KEY_ALIASES[low]
+            elif len(name) == 1 and name.isalpha():
+                name = "K_" + low            # 字母只有小写那一份（实查）
+            elif len(name) == 1 and name.isdigit():
+                name = "K_" + name
+            elif len(name) in (2, 3) and name[0] in "Ff" and name[1:].isdigit():
+                name = "K_" + name.upper()   # F1..F24
+            else:
+                return s                     # 不认识的键名：整条交回引擎判
+        return "_".join(out_mods + [name])
+
+
+    def _A11yKeySpecs(raw, default=()):
+        r"""把逐作层给的键位配置规整成**引擎键名列表**（再交给 `_A11yValidSpecs` 判）。
+
+        容两种写法：`["Alt+Shift+F9"]`（列表，正常写法）与 `"Alt+Shift+F9"`
+        （字符串 —— 很自然的笔误，而它的后果很隐蔽：按字符迭代会把每个字母
+        都当成一条键名，**一个都不合法**，最后表现成「键没了」，只在日志里留一行）。
+
+        写错不猜、更不抛：判不了的交给 `_A11yValidSpecs`，由**引擎自己的解析器**
+        决定去留（那条纪律的理由见它）。
+        """
+        if raw is None:
+            raw = default
+        if isinstance(raw, str):
+            raw = [raw]
+        try:
+            return [_A11yKeySpec(s) for s in raw]
+        except TypeError:
+            return []
+
+
     def _A11yNavAction(delta):
         """把「上/下一个」包成**无参**可调用对象（同 `_A11yDigitAction`）。"""
         def _nav_act():
@@ -135,7 +252,9 @@ init 1200 python:
         binds = {}
 
         # ---- 重读键 ----
-        reread = _A11yValidSpecs(list(A11yHost.CfgRereadKey or []))
+        # 也过一遍 `_A11yKeySpecs`：默认的 `"K_F5"` 原样透传，而玩家/逐作层写
+        # `"Ctrl+R"` 这种**人话键名**（或漏写方括号）时同样能生效。
+        reread = _A11yValidSpecs(_A11yKeySpecs(A11yHost.CfgRereadKey))
         if reread and "A11yReread" not in config.keymap:
             config.keymap["A11yReread"] = reread
             A11yHost.log("已登记重读键 A11yReread = %s" % reread)
@@ -161,13 +280,20 @@ init 1200 python:
         if digit_n:
             A11yHost.log("已登记选项数字直选键: %d 组（主键盘 + 小键盘）" % digit_n)
 
-        # ---- 朗读后端切换键（排查用）----
-        cyc = _A11yValidSpecs(["K_F9"])
+        # ---- 后端切换键（默认 F9；可用 `CfgBackendCycleKey` 改成带修饰键的组合）----
+        # 键名走 `_A11yKeySpecs`：`["Alt+Shift+F9"]` 这种写法与引擎的
+        # `["alt_shift_K_F9"]` 等价（理由见 `_A11yKeySpec`）。
+        cyc = _A11yValidSpecs(_A11yKeySpecs(A11yHost.CfgBackendCycleKey, ["K_F9"]))
         if cyc and "A11yBackendCycle" not in config.keymap:
             config.keymap["A11yBackendCycle"] = cyc
             A11yHost.log("已登记朗读后端切换键 A11yBackendCycle = %s" % cyc)
         if "A11yBackendCycle" in config.keymap:
             binds["A11yBackendCycle"] = [A11yHost.keys.on_backend_cycle]
+        else:
+            # 同重读键：登记失败时**绝不放一个名字进 Keymap**（放进去在正式版里会静默
+            # 变成恒假，在开发者模式下则直接抛异常 ⇒ 游戏起不来）。
+            A11yHost.log("Warning: 后端切换键登记失败（%r），本次不绑定" % (
+                A11yHost.CfgBackendCycleKey,))
 
         # ---- 整屏朗读键 ----
         # 为什么需要它：不是所有内容都是控件 —— 历史记录里过去的台词在 `viewport` 里，
@@ -263,22 +389,26 @@ init 1200 python:
 
         # ------------------------------------------------------------ 后端切换
         def on_backend_cycle(self):
-            """F9：在「自动 / NVDA / 引擎同款 SAPI / 两者同时」之间轮换。
+            """后端切换键（默认 **F9**）：切到**下一个当前可用**的朗读后端。
 
-            给玩家这个键，是因为本机实机上出现过「NVDA 控制器返回码恒为 0，但只有
-            第一条出声」（见 01_speech.rpy 的「尚未查清」一节与 docs §7.5）：排查这类
-            问题最重要的是能**当场换一条出声通路**并立刻听到结果，而不是关掉游戏改配置
-            再重开 —— 盲人玩家做一次这样的循环成本极高。
-            「两者同时」让同一句话同时走 NVDA 与引擎同款 SAPI：听得出哪一路在响就不必
-            再靠猜，同时它也是**兜底档**（某一路坏了，另一路照读）。
+            完整语义（固定顺序、跳过不可用、把跳过了谁念出来、落盘记到下次启动）在
+            `A11ySpeech.cycle_backend()` 里 —— 那里是**能被探针驱动**的地方，
+            所以判定逻辑都放在平台层，这里只做三件事：响提示音、拿回整句播报、念出来。
+
+            「切档位」在本机实机上出现过「NVDA 控制器返回码恒为 0，但只有第一条出声」
+            （见 01_speech.rpy 的「尚未查清」一节与 docs §7.5）：排查这类问题最重要的是能
+            **当场换一条出声通路**并立刻听到结果，而不是关掉游戏改配置再重开 ——
+            盲人玩家做一次这样的循环成本极高。
+
+            ⚠ 播报必须走**新选中的后端**：`A11yHost.repeat.say` 是平台层唯一出口，
+            它内部用的就是刚设好的档位 —— 所以玩家听到的这一句本身就是「切过去了」的
+            证据（听不到才是问题，而不是「不知道切没切」）。
             """
             try:
                 A11yHost.key_cue()
-                label = A11yHost.speech.cycle_mode()
-                # 用新后端立刻报一句，玩家马上知道切成了哪一档。
+                line = A11yHost.speech.cycle_backend()
                 # `record=False`：不进重读缓冲（重读键应该重读剧情，不是这句）。
-                A11yHost.repeat.say("朗读后端：%s" % label,
-                                    interrupt=True, record=False)
+                A11yHost.repeat.say(line, interrupt=True, record=False)
             except Exception:
                 A11yHost.log_exc("切换朗读后端失败")
 

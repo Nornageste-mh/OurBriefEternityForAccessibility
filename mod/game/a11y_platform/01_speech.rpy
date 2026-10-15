@@ -1,8 +1,9 @@
 # A11yFramework / Ren'Py 版 —— 平台层（L1）· 朗读后端链
 #
-# 对应上游的 `platform/Speech.cs` + `Nvda.cs` + `Sapi.cs` 三个文件。
-# 上游后端链是 Tolk -> NVDA -> ZDSR -> SAPI；本实现的两个差异**都是刻意的**，
-# 理由写在下面（并按上游纪律：差异要说明依据，不许默默改）。
+# 对应上游的 `platform/Speech.cs` + `Nvda.cs` + `Zdsr.cs` + `Sapi.cs` 四个文件。
+# 上游后端链是 Tolk -> NVDA -> ZDSR -> SAPI；本实现**同为四级**，唯一一处差异
+# （Tolk 不随包分发）是刻意的，理由写在下面（并按上游纪律：差异要说明依据，
+# 不许默默改）。
 #
 # L1 冻结层，逐作不得改写。
 
@@ -12,17 +13,36 @@ init -100 python:
     class A11ySpeech(object):
         """朗读后端的注册与「只升不降」调度。
 
-        ── 与上游的两处差异（都是刻意的，按上游纪律写明依据）────────────────
+        ── 与上游的唯一一处差异（是刻意的，按上游纪律写明依据）──────────────
 
-        1. **ZDSR（争渡）不适配。** 上游把它列为实验阶段（README 原文：ZDSR 后端
-           「真正出声（中文往返）」属**没做过的验证**，「在此之前不要把这一级当成
-           『已验证可用』」）。本机实测同样印证：`InitTTS` 返回 0，而判据
-           `GetSpeakState` 返回 2（读屏没有运行或没有授权）。按维护者决定不做这一级。
+        **Tolk 不随包分发。** 它需要一整套读屏驱动 dll 伴随，而相对「NVDA
+        controller client 直连」的增量主要是覆盖 JAWS / SuperNova / ZoomText 等
+        **中文用户基本不用**的读屏。本实现改为 NVDA 直连 + ZDSR + SAPI 兜底；
+        玩家若自行在游戏根目录放 `Tolk.dll`，会自动把它接在链首
+        （见 `A11yTolkBackend`）；没放就跳过，不影响后面三级。
 
-        2. **Tolk 不随包分发。** 它需要一整套读屏驱动 dll 伴随，而相对「NVDA
-           controller client 直连」的增量主要是覆盖 JAWS / SuperNova / ZoomText 等
-           **中文用户基本不用**的读屏。本实现改为 NVDA 直连 + SAPI 兜底；玩家若自行
-           在游戏根目录放 `Tolk.dll`，会自动把它接在链首（见 `A11yTolkBackend`）。
+        ── ZDSR（争渡）这一级：从「不适配」改成「接上」（依据与边界）─────────
+
+        旧版这里写着「ZDSR 不适配，按维护者决定不做这一级」。改的依据不是上游把它
+        列为实验阶段，而是**本机实测把那条否定判据解释清楚了**（见 §1.5 的实测）：
+
+          · `InitTTS(0, NULL, False)` 返回 **0**（读屏没在跑时**也是 0**）——
+            它只表示「版本对得上」，**不表示读屏在跑**；
+          · 真正的判据 `GetSpeakState()` 在同一个进程里返回 **2**
+            （读屏没有运行或没有授权）。
+
+        当时的结论「判据不成立」是对的，但它推出的是「这一级不该接」，
+        正确的推论是「**照 `GetSpeakState` 判，判不过就顺降**」—— 也就是链上多一级
+        「可用就用、不可用就当它不在」的后端，而不是把这一级删掉。
+        `A11yZdsrBackend.available()` 因此只认 `GetSpeakState() in (3, 4)`
+        （3 正在朗读 / 4 没有朗读），**绝不认 `Speak()` 的返回值** ——
+        未授权时 `Speak()` 同样返回 0，拿它当判据就会重新造出
+        「自称可用却一句话都不出」这个故障。
+
+        ⚠ **本机只验到哪一步（不许当成已验证）**：本机能加载 dll、`InitTTS -> 0`、
+        `GetSpeakState -> 2`、后端据此判为不可用并顺降到 SAPI。
+        **「争渡在跑时真的出声（中文往返）」本机尚未发生过** ——
+        需要维护者开着争渡按 F9 实测（`CfgModes` 里已经有 `"ZDSR"` 这一档）。
 
         ── 照抄上游、不再重新发明的三条 ────────────────────────────────────
 
@@ -50,13 +70,35 @@ init -100 python:
         #: 定期重试可用后端的间隔（秒）。用于「先开游戏、后开读屏」的玩家。
         RETRY_INTERVAL = 3.0
 
-        #: 后端模式的轮换表（F9 键按这个顺序切换）。
+        #: 后端轮换表的**固定顺序**（后端切换键按这个顺序走一档）。
         #:
-        #: `""` = 自动（NVDA -> 引擎同款 SAPI）；`"两者"` = 同时走所有可用后端。
-        #: 「两者」是**诊断档 + 兜底档**：本机实机上 NVDA 控制器出现过「返回码恒为 0
-        #: 但只有第一条出声」的现象（见 `register_builtin` 的「尚未查清」一节）。
-        #: 有这一档，玩家按一下 F9 就能当场听出是哪一路在响 —— 不必关掉游戏改配置再重开。
-        CfgModes = ["", "NVDA", "SAPI(引擎同款)", "两者"]
+        #: ★ 这是**跨补丁的统一约定**（维护者要求）：自动 -> Tolk -> NVDA -> 争渡 ->
+        #: SAPI -> 回自动。`""` 是「自动」档（交给 `_pick()` 现挑），其余是后端 `name`。
+        #:
+        #: ⚠ 表里有这一档**不等于**按键会停在它上面：**不可用的后端会被跳过并播报**
+        #: （`cycle_backend()`，那是这个键最重要的一条行为）。Tolk 尤其如此 ——
+        #: 它要玩家自备 dll，绝大多数机器上根本没注册。
+        CfgModes = ["", "Tolk", "NVDA", "ZDSR", "SAPI(引擎同款)"]
+
+        #: 档位 -> **播报名**（人话）。键是 `CfgModes` 里的档位值（后端名或 `""`）。
+        #:
+        #: 为什么不在后端类上挂一个 `label`：后端类只回答「我叫什么、能不能用」，
+        #: 面向玩家的中文名是**播报层**的事（而且 `""` 这一档根本不是后端）。
+        #: `"ZDSR" -> "争渡读屏"` 是维护者要求的叫法 —— 玩家嘴里念的是读屏软件的
+        #: 名字，不是我们的类名；念 `ZDSR` 等于让他去对代码。
+        ModeNames = {
+            "": "自动",
+            "Tolk": "Tolk",
+            "NVDA": "NVDA",
+            "ZDSR": "争渡读屏",
+            "SAPI(引擎同款)": "引擎同款 SAPI",
+            "两者": "两者同时",
+        }
+
+        #: 玩家按后端切换键选中的档位记在这里，跨启动保留（走 `A11yHost.remember`，
+        #: 落盘位置是引擎的 persistent）。前缀带 `a11y_` 是为了在玩家的
+        #: `persistent` 存档里一眼看出这一条是本补丁写的。
+        REMEMBER_KEY = "a11y_speech_backend"
 
         def __init__(self):
             self._backends = []
@@ -102,10 +144,18 @@ init -100 python:
                 self.register(tb)
                 A11yHost.log("Tolk 可用，已接入链首（玩家自备 dll）")
 
-            # ★ 顺序：**NVDA 优先，say.vbs 兜底**（按维护者要求改回 NVDA 优先）。
+            # ★ 顺序：**NVDA 优先，ZDSR 居中，say.vbs 兜底**（按维护者要求改回 NVDA 优先）。
             #   备选后端的结论（都有实机依据，不是偏好）：
             #     · `A11yNvdaBackend`    借读屏发声，语速音色是玩家自己的设置
             #                            —— 无障碍补丁应有的默认；
+            #     · `A11yZdsrBackend`    争渡读屏（中文读屏里用户量最大的那一支）。
+            #                            放 NVDA 之后、say.vbs 之前：判据是官方的
+            #                            `GetSpeakState() in (3, 4)`，判不过就顺降 ——
+            #                            争渡没开或没授权时，它的表现与「不在链上」相同；
+            #                            它的状态查询缓存 2 秒（短于 `RETRY_INTERVAL`），
+            #                            所以「先开游戏、后开争渡」也能在几秒内被接上。
+            #                            ⚠ 本机只验到「判据返回 2 ⇒ 顺降」这条路径，
+            #                            「争渡在跑时真的出声」尚未实测。
             #     · `A11ySayVbsBackend`  引擎自己的 Windows TTS 路径（`wscript say.vbs`），
             #                            实测**不崩**，作兜底；代价是系统语音而非读屏语音；
             #     · 裸 COM 直调 SAPI     **代码已删除**，一注册就把游戏崩了 ——
@@ -118,6 +168,7 @@ init -100 python:
             #   因此不能断言 NVDA 这条路已经可靠 —— 玩家若遇到「只响一次」，
             #   把配置 `CfgSpeechBackend` 设成 `"SAPI(引擎同款)"` 可切到兜底后端。
             self.register(A11yNvdaBackend())
+            self.register(A11yZdsrBackend())     # ★ 0.0.1.6 接入：NVDA 之后、say.vbs 兜底之前
             self.register(A11ySayVbsBackend())
 
         def set_pinned(self, name):
@@ -125,7 +176,7 @@ init -100 python:
             self._pinned = (name or "").strip()
             self._active = None
 
-        # -------------------------------------------------------- 模式（F9 切换）
+        # -------------------------------------------------------- 模式（后端切换键切换，默认 F9）
         def set_mode(self, mode):
             """设置后端模式：`""` 自动 / 后端名 钉死 / `"两者"` 同时。
 
@@ -150,14 +201,162 @@ init -100 python:
             A11yHost.log("朗读模式 -> %s | 后端结论: %s" % (self.mode_label(), self.verdict()))
             return self.mode_label()
 
-        def cycle_mode(self):
-            """按 `CfgModes` 轮换一档，返回新档位的中文名（供播报）。"""
-            modes = list(self.CfgModes)
+        def cycle_backend(self):
+            r"""后端切换键（默认 F9）：切到**下一个当前可用**的后端，返回要播报的整句话。
+
+            ── 顺序与「跳过」的语义（维护者的统一约定）───────────────────────────
+
+            固定顺序 `自动 -> Tolk -> NVDA -> 争渡 -> SAPI -> 回自动`（= `CfgModes`）。
+            **不可用的后端直接跳过，不停在它上面**，并把「跳过了谁、为什么」一并念出来。
+
+            为什么必须「跳过 + 播报跳过」，而不是停在不可用的一档：
+              · 停在不可用档 = 按一下键，**世界安静了** —— 而「安静」在本项目里是最贵的
+                故障形态（`CfgKeyCue` 那一整段就是为它写的）：分不清「这路坏了」还是
+                「键没送到」；
+              · 静默跳过 = 玩家以为「少了一级」或「少按了一下」——同样是假信息，
+                而且他没有任何办法看出来。
+            所以：**跳过 + 说出跳过了谁**。按键表与 FAQ 同步改了 ——
+            不能代码一个说法、文档一个说法（那是本项目最忌讳的自相矛盾）。
+
+            ── 落盘（跨启动保留）────────────────────────────────────────────────
+
+            选中之后同时写两处：
+              · `A11yHost.CfgSpeechBackend`（**配置面**：`validate()`、现场快照、
+                以及任何读配置的地方都立刻跟上）；
+              · `A11yHost.remember(self.REMEMBER_KEY, ...)`（引擎的 persistent）。
+            只写配置面是不够的：`CfgSpeechBackend` 是逐作层在 `init -190` 赋的字面量，
+            **每次启动都会被重写成默认值** —— 「下次启动还记着」只能靠 persistent，
+            下次由 `boot_mode()` 读回来。
+
+            ── 为什么 `"两者"` 不再占这个环里的一档 ──────────────────────────────
+
+            0.0.1.6 之前 F9 走的是 `["", "NVDA", "SAPI(引擎同款)", "两者"]`；维护者要求
+            所有补丁的这一个键共用同一套顺序（上面五档），所以 `"两者"` 从环里退出。
+            它的能力一点没少 —— 仍然可以用配置写死（`CfgSpeechBackend = "两者"`），
+            只是不再占按键的档位。**这是行为变更，不是清理**，文档里逐处写明了。
+            """
+            stops = list(self.CfgModes)
             try:
-                i = modes.index(self._mode)
+                i = stops.index(self._mode)
             except ValueError:
+                # 当前档位不在表里（`"两者"`，或名字写错时的中间态）：从「自动」的位置
+                # 往后走一步，绝不因为状态陌生就卡住不动（那又会变成「按键没反应」）。
                 i = 0
-            return self.set_mode(modes[(i + 1) % len(modes)])
+            # 「自动」不是一个具体后端，而是一句「按默认优先级现挑」——所以它的起点要按
+            # **实际选中的那个后端**算。否则第一下按下去切到的还是同一个后端：实机就是这么
+            # 表现的（开着 NVDA 时自动挑中的就是 NVDA），玩家会以为这个键没生效。
+            # 四个 C# 仓库里的 `Speech.CycleIndexOf` 是同一条规则，不能一边一个说法。
+            if not self._mode:
+                active = (getattr(self._active, "name", "") or "")
+                for k, s in enumerate(stops):
+                    if s and s.lower() == active.lower():
+                        i = k
+                        break
+            skipped = []
+            for step in range(1, len(stops) + 1):
+                stop = stops[(i + step) % len(stops)]
+                # 已经在「自动」上时，再切到「自动」是**空转**（配置没变、声音没变），
+                # 跳过它继续往前找。否则「只有一个后端可用、而它正好是最后一档」时，
+                # 按一下键只会从自动跳到自动 —— 玩家会以为这个键坏了。
+                # 反过来，从钉死的档位按下去时，「自动」是有效落点（= 取消钉死）。
+                if not stop and not self._mode:
+                    continue
+                if self._stop_available(stop):
+                    self.set_mode(stop)
+                    try:
+                        A11yHost.CfgSpeechBackend = stop
+                        A11yHost.remember(self.REMEMBER_KEY, stop)
+                    except Exception:
+                        A11yHost.log_exc("后端选择落盘失败")
+                    line = "语音后端：%s" % self.mode_display()
+                    if skipped:
+                        line += "（已跳过 %s）" % "、".join(skipped)
+                    return line
+                skipped.append("%s：%s" % (self._display(stop), self._stop_skip_why(stop)))
+            # 走完一整圈都没落点 —— 只有 `CfgModes` 被改空才会发生，不该出现
+            A11yHost.log("Warning: 后端轮换表里没有可用档位 %r" % (stops,))
+            line = "语音后端：%s" % self.mode_display()
+            if skipped:
+                # 全灭时更要把「试过谁、为什么不行」念出来：这时候玩家最需要知道该去装什么
+                line += "（已跳过 %s）" % "、".join(skipped)
+            return line
+
+        def boot_mode(self):
+            """启动时定档：**配置里写死的 > 玩家上次按键选的 > 自动**。返回档位名。
+
+            优先级为什么是这样排的（不是随手排的）：
+              · 配置（`CfgSpeechBackend`）是维护者/高级玩家写在逐作层的**排查手段**，
+                必须压得住记忆 —— 否则「我明明把它改成 SAPI 了，怎么还走 NVDA」
+                会成为下一个查半天的假故障（本项目已经吃过一次
+                「文档一个说法、代码一个说法」的亏）；
+              · 配置为空（默认）时，玩家按键留下的选择就是**他自己的偏好**：
+                每开一次游戏都要重按一遍切换键的成本极高。
+
+            名字写错（例如记忆里存着一个已经装不回去的 `"Tolk"`）由
+            `set_mode()` 的白名单核对兜住：退回自动 + 一行 Warning，不会整局哑掉。
+            """
+            want = (A11yHost.CfgSpeechBackend or "").strip()
+            if not want:
+                try:
+                    want = (A11yHost.recall(self.REMEMBER_KEY, "") or "").strip()
+                except Exception:
+                    want = ""
+                if want:
+                    A11yHost.log("后端：沿用玩家上次按键选定的档位 %r" % want)
+            return self.set_mode(want)
+
+        def _display(self, name):
+            """档位/后端名 -> 播报名。不认识的**照原样返回**（绝不编一个名字）。"""
+            if name == "(无)":
+                return "无可用后端"
+            return self.ModeNames.get(name, name)
+
+        def _stop_available(self, stop):
+            """这一档**现在**能不能切过去。
+
+            `""`（自动）永远算可用 —— 它不是一个后端，而是「让 `_pick()` 现挑」；
+            挑不出来时播报里会照实说「无可用后端」，那比「把自动也跳过」诚实。
+            名字没注册（例如玩家没放 `Tolk.dll`）一律算不可用 —— 这正是「跳过并说明」
+            要处理的主要情况。
+            """
+            if not stop:
+                return True
+            for b in self._backends:
+                if b.name.lower() == stop.lower():
+                    try:
+                        return bool(b.available())
+                    except Exception:
+                        return False
+            return False
+
+        def _stop_skip_why(self, stop):
+            """被跳过的档位怎么说（**短句**，要进播报）。
+
+            详细的可用性理由不在这里编：`set_mode()` 每次都会把 `verdict()` 那行
+            （`ZDSR=争渡读屏没有运行或没有授权`）写进日志，排查看那里。
+            播报里塞长句只会让玩家听不完。
+            """
+            for b in self._backends:
+                if b.name.lower() == stop.lower():
+                    return "不可用"
+            return "未接入"
+
+        def mode_display(self):
+            """当前档位的**播报名**（供播报）。
+
+            与 `mode_label()` 的分工：那个是**日志名**（用后端 `name`，方便 grep 对账），
+            这个是**给耳朵听的**（`争渡读屏` 而不是 `ZDSR`）。
+
+            「自动」档要带上它**实际挑中了谁** —— 否则玩家切到自动只听到「自动」
+            两个字，还是不知道现在是谁在念（同 `mode_label()` 的理由）。
+            """
+            if self._mode == "两者":
+                names = self._last_spoke or self._available_names()
+                return "两者同时（%s）" % (
+                    "+".join(self._display(n) for n in names) if names else "无可用后端")
+            if self._mode:
+                return self._display(self._mode)
+            return "自动（%s）" % self._display(self.backend_name())
 
         def mode_label(self):
             """档位的中文名（供播报与日志）。
@@ -635,6 +834,318 @@ init -100 python:
         def stop(self):
             if self._lib is not None:
                 self._lib.nvdaController_cancelSpeech()
+
+
+    # ============================================================ ZDSR（争渡读屏）后端
+    class A11yZdsrBackend(object):
+        r"""争渡读屏（ZDSR）的纯 ctypes 封装 —— 上游链 `Tolk -> NVDA -> ZDSR -> SAPI`
+        的第三级。上游对应物是 `platform/Zdsr.cs`。
+
+        接口依据：**官方 `ZDSRAPI.txt`**（随争渡分发，本机在
+        `C:\Program Files (x86)\zdsr\zdsr\ZDSRAPI.txt` 逐字读过，GBK）。
+        本类只用其中四个导出（第五个 `Braille` 允许缺失）：
+
+            int  WINAPI InitTTS(int type, const WCHAR* channelName, BOOL bKeyDownInterrupt)
+            int  WINAPI Speak(const WCHAR* text, BOOL bInterrupt)
+            int  WINAPI GetSpeakState()
+            void WINAPI StopSpeak()
+            int  WINAPI Braille(const WCHAR* text, BOOL bFlashMessage)   # 1.0.0.5+ 才有
+
+        导出名不是猜的：`tools/probe_dll.py` 读 PE 导出表核过本机那份 1.0.0.5，
+        与上面五个一一对应（没有 `SpeakText` / `PauseSpeak` / `SetVolume` 之类）。
+
+        ── ★ 可用性判据只有一条：`GetSpeakState()` ∈ {3, 4} ★ ────────────────
+
+        这是本项目**用故障换来的纪律**，不是风格问题：
+
+          · 官方文档里 `InitTTS` 只返回 `0 成功 / 1 版本不匹配` ——
+            「返回 0」**仅仅表示版本对得上**，读屏没在跑时它照样返回 0（本机实测）；
+          · 未授权时 `Speak()` 也返回 0（它的失败码 2 是**送达之后**才判的），
+            所以拿 `Speak()` 的返回值当可用性判据，得到的正是本项目明令禁止的
+            「自称可用却一句话都不出」；
+          · 唯一能回答「读屏在不在、能不能收」的是 `GetSpeakState()`：
+            `3 正在朗读 / 4 没有朗读` 才算可用；`1 版本不匹配`、
+            `2 没有运行或没有授权`、`8 没有成功送达`、`9 独立通道尚未就绪`
+            **一律算不可用**（旧版 `tools/probe_backend.py` 把 `1` 当「就绪」，
+            同时把它算进可用 —— 那正是「版本不匹配的 dll 被报成工作正常」的写法，
+            已按官方文档修正）。
+
+        ── 加载次序：官方安装目录优先（与 NVDA 那三条纪律不冲突）─────────────
+
+        官方原文：「应用程序可以直接调用争渡读屏安装目录下的相应 dll 文件……
+        **建议直接读取争渡读屏安装目录下的 dll 文件，尽量不要复制到自己程序目录**」，
+        理由是 dll 随读屏升级（原文另一句：「争渡读屏 26.6 dll 文件有更新……
+        需要重新复制新的 dll 文件」）。所以候选目录第一梯队是官方安装目录；
+        第二梯队才复用 `A11yNvdaBackend._candidate_dirs()`（玩家自放 / 兼容旧行为）。
+        仍然**一律按绝对路径加载、不写 `__file__`** —— 理由见 NVDA 后端 `_ensure`。
+        """
+
+        name = "ZDSR"
+
+        #: dll 文件名，**64 位在前**：本进程是 64 位（游戏自带运行时是
+        #: `lib/py3-windows-x86_64/python.exe`），32 位那份加载必定失败
+        #: （`OSError: [WinError 193]`）。列着它只是为了在「机器上只剩 32 位那一份」时
+        #: 能把真实原因写进结论，而不是含糊地说一句「找不到 dll」。
+        DLL_NAMES = ("ZDSRAPI_x64.dll", "ZDSRAPI.dll")
+
+        #: 官方安装目录（官方 `ZDSRAPI.txt` 原文：「通常位于
+        #: C:\Program Files(x86)\zdsr\zdsr 内」）。本机实测该目录存在且含 1.0.0.5。
+        OFFICIAL_DIRS = (
+            r"C:\Program Files (x86)\zdsr\zdsr",
+            r"C:\Program Files\zdsr\zdsr",
+        )
+
+        #: `GetSpeakState()` 的返回值 → 人话（逐条抄官方文档，**没有 0**）。
+        STATE_WHY = {
+            1: "版本不匹配",
+            2: "争渡读屏没有运行或没有授权",
+            8: "命令没有成功送达",
+            9: "独立通道尚未就绪",
+        }
+
+        #: `InitTTS` 的返回值 → 人话（官方只有两个）。
+        INIT_WHY = {1: "版本不匹配"}
+
+        #: 状态查询的缓存时长（秒）。★ 必须短于 `A11ySpeech.RETRY_INTERVAL`（3.0 秒）——
+        #: `_pick()` 每 3 秒会问一轮可用性，缓存 2 秒既省掉「每念一句一次跨进程调用」，
+        #: 又保证「先开游戏、后开争渡」以及「中途关掉争渡」都能在几秒内被察觉。
+        STATE_TTL = 2.0
+
+        #: 握手失败后的重试间隔（秒）。★ 必须限流：读屏没开时 `available()` 每 3 秒
+        #: 就会被问一次，不限流就变成「每 3 秒一次 `InitTTS`」，而每次握手 dll 都会
+        #: 往 stdout 写一行（见 `_handshake` 的副作用说明）—— 死读屏会把日志刷满。
+        #: 握手**成功**后不再重复调用（官方只说它可以重复调用，没说必须）。
+        INIT_RETRY_INTERVAL = 30.0
+
+        def __init__(self):
+            self._lib = None
+            self._load_error = None
+            self.loaded_from = None
+            self._has_braille = False
+            self._tried = False
+            self._ok = False
+            self._why = "未初始化"
+            self._handshake_ok = False
+            self._init_rc = None
+            self._init_why = None
+            self._init_tried_at = None
+            self._state = None
+            self._state_at = None
+            self._state_error = None
+
+        @staticmethod
+        def _candidate_dirs():
+            r"""dll 候选目录，按优先级（官方安装目录优先，理由见类文档）。"""
+            import os
+            dirs = list(A11yZdsrBackend.OFFICIAL_DIRS)
+            # 非默认安装盘：官方只给了默认位置，这里用环境变量把同一路径再拼一遍
+            for ev in ("ProgramFiles(x86)", "ProgramFiles", "ProgramW6432"):
+                base = os.environ.get(ev)
+                if base:
+                    dirs.append(os.path.join(base, "zdsr", "zdsr"))
+            try:
+                dirs.extend(A11yNvdaBackend._candidate_dirs())
+            except Exception:
+                pass
+            out = []
+            for d in dirs:
+                if d and d not in out:
+                    out.append(d)
+            return out
+
+        def _find_dll(self):
+            """找 dll：**先在所有候选目录里找 64 位那一份**，找不到才退而找 32 位那份。
+
+            （按目录逐个试两个名字是不对的：那会让「官方目录里只有 32 位那份」挡住了
+            后面目录里可用的 64 位那份 —— 进程是 64 位，加载 32 位 dll 必然失败。）
+            """
+            import os
+            for n in self.DLL_NAMES:
+                for d in self._candidate_dirs():
+                    p = os.path.join(d, n)
+                    if os.path.exists(p):
+                        return p
+            return None
+
+        def _ensure(self):
+            """加载 dll 并绑定导出。幂等。范式与理由见 `A11yNvdaBackend._ensure`。"""
+            import ctypes
+            if self._lib is not None or self._tried:
+                return self._lib is not None
+            self._tried = True
+
+            path = self._find_dll()
+            if path is None:
+                self._load_error = "未找到 ZDSRAPI_x64.dll（争渡读屏未安装？）"
+                return False
+
+            try:
+                lib = ctypes.WinDLL(path)
+                # ★ 四个必需导出逐个绑定 —— 名字写错/缺失会在这里当场抛 AttributeError，
+                #   而不是等到玩家需要朗读时才炸（这条纪律的来历见 NVDA 后端的说明）。
+                lib.InitTTS.argtypes = [ctypes.c_int, ctypes.c_wchar_p, ctypes.c_bool]
+                lib.InitTTS.restype = ctypes.c_int
+                lib.Speak.argtypes = [ctypes.c_wchar_p, ctypes.c_bool]
+                lib.Speak.restype = ctypes.c_int
+                lib.GetSpeakState.argtypes = []
+                lib.GetSpeakState.restype = ctypes.c_int
+                lib.StopSpeak.argtypes = []
+                lib.StopSpeak.restype = None          # 官方：void WINAPI StopSpeak()
+                # `Braille` 只有 1.0.0.5+ 才有（官方文档原文），**缺失是允许的** ——
+                # 目前补丁也不用它（平台层没有盲文出口），绑定只为把「这份 dll 有没有」
+                # 写进启动日志，方便排查版本过旧的机器。
+                try:
+                    lib.Braille.argtypes = [ctypes.c_wchar_p, ctypes.c_bool]
+                    lib.Braille.restype = ctypes.c_int
+                    self._has_braille = True
+                except AttributeError:
+                    self._has_braille = False
+                self._lib = lib
+                self.loaded_from = path
+                return True
+            except Exception as e:
+                self._load_error = "%s: %s" % (type(e).__name__, e)
+                return False
+
+        def _handshake(self):
+            r"""与读屏握手一次：`InitTTS(0, None, False)`。成功一次后不再重复。
+
+            三个参数都是官方文档写死的值，逐条有理由：
+
+              · `type=0`（读屏通道）—— 声音走玩家自己的读屏设置（语速/音色/声卡），
+                这与「借读屏发声」的初衷一致；`1` 是独立通道，本项目不用。
+              · `channelName=None` —— 官方原文：「type 为 0 时忽略，传入 NULL」。
+                ⚠ 必须传 `None` 而不是 `""`（空串是 type=1 的写法）。
+              · `bKeyDownInterrupt=False` —— 按键**不**打断。本补丁的朗读是排队语义
+                （`A11ySpeech.CfgInterrupt=False`，依据见那里的长注释）：玩家按键时
+                正在念的那一句必须念完，否则又变成「只读一部分 = 无障碍完整性问题」。
+
+            ⚠ **副作用（本机实测）**：每调用一次 `InitTTS`，dll 都会往 **stdout** 写一行
+
+                --------------InitTTS rt = N
+
+            游戏进程里 stdout 被引擎收进 `log.txt`，所以启用 ZDSR 之后 `log.txt` 会多出
+            这类行 —— 它**不是**本补丁的日志（本补丁的日志一律带 `[A11y]` 前缀），
+            排查时别把它当成我们打印的东西。`INIT_RETRY_INTERVAL` 那条限流同时也是
+            为了不让这种行刷屏。
+            """
+            import time
+            if self._handshake_ok:
+                return True
+            now = time.monotonic()
+            if self._init_tried_at is not None and \
+                    (now - self._init_tried_at) < self.INIT_RETRY_INTERVAL:
+                return False
+            self._init_tried_at = now
+            try:
+                self._init_rc = self._lib.InitTTS(0, None, False)
+            except Exception as e:
+                self._init_rc = None
+                self._init_why = "InitTTS 调用异常 %s: %s" % (type(e).__name__, e)
+                self._why = self._init_why
+                A11yHost.log("ZDSR " + self._init_why)
+                return False
+            rc = self._init_rc
+            if rc == 0:
+                self._handshake_ok = True
+                A11yHost.log("ZDSR InitTTS(0=读屏通道, NULL, 按键不打断) -> 0")
+                return True
+            self._init_why = "InitTTS 返回 %d（%s）" % (rc, self.INIT_WHY.get(rc, "未知"))
+            self._why = self._init_why
+            A11yHost.log("ZDSR " + self._init_why)
+            return False
+
+        def _read_state(self):
+            """问一次 `GetSpeakState()`（**判据的唯一来源**），记下时间戳与结论。
+
+            `self._ok` 只在这里被写 —— 也就是说：除了「状态 ∈ {3,4}」，
+            没有任何别的路径能让这个后端自称可用。
+            """
+            import time
+            self._state = None
+            self._state_error = None
+            try:
+                self._state = int(self._lib.GetSpeakState())
+            except Exception as e:
+                self._state_error = "%s: %s" % (type(e).__name__, e)
+            self._state_at = time.monotonic()
+            if self._state in (3, 4):
+                self._ok = True
+                self._why = "正在朗读" if self._state == 3 else "在跑（没有朗读）"
+            elif self._state is None:
+                self._ok = False
+                self._why = "GetSpeakState 调用异常（%s）" % (self._state_error or "未知")
+            else:
+                self._ok = False
+                self._why = self.STATE_WHY.get(self._state, "未知返回码 %d" % self._state)
+
+        def init(self):
+            if not self._ensure():
+                self._why = self._load_error or "加载失败"
+                return
+            self._handshake()
+            if self._state_at is None:
+                self._read_state()
+            A11yHost.log("ZDSR: dll=%s 盲文导出=%s 结论=%s" % (
+                self.loaded_from,
+                "有" if self._has_braille else "无（1.0.0.1 没有这个导出）",
+                self._why))
+
+        def available(self):
+            """★ 判据只有 `GetSpeakState() in (3, 4)` —— **绝不看 `Speak()` 的返回值**。
+
+            失败一律返回 False（而不是抛异常），链上据此顺降到下一级；
+            调用代价与缓存策略见 `STATE_TTL` 的说明。
+            """
+            import time
+            if not self._ensure():
+                return False
+            if not self._handshake():
+                # 握手失败（或还在限流窗口里）：不必再问状态，直接判不可用
+                return False
+            now = time.monotonic()
+            if self._state_at is None or (now - self._state_at) > self.STATE_TTL:
+                self._read_state()
+            return self._ok
+
+        def reason(self):
+            """人话写明「为什么不可用」。
+
+            ⚠⚠ **绝不允许抛异常。** `A11ySpeech.verdict()` 只给 `available()` 包了
+            `try`，读 `reason()` 时**没有** `try`（见那边的实现）—— 所以这里一旦抛出，
+            「后端结论」那一行日志就会被打断，而那一行正是排查「为什么全灭」的唯一
+            线索。整段包 `try` 之外还有一条纪律：**这里不做任何跨进程调用**，
+            只读缓存下来的字符串（状态由 `available()` 负责刷新）。
+            """
+            try:
+                if self._lib is None:
+                    return self._load_error or "未初始化"
+                return self._why
+            except Exception as e:
+                return "原因取用异常 %s" % type(e).__name__
+
+        def speak(self, text, interrupt=True):
+            """透传 `Speak(text, bInterrupt)`；`rc != 0` 抛异常。
+
+            `interrupt` **原样透传**（上游/出口层怎么决定就怎么用）：`True` = 清空排队
+            立刻打断，`False` = 等空闲时念。这里不自己改打断语义 —— 打断策略由
+            `A11ySpeech.CfgInterrupt` 与 `A11yRepeat.INTERRUPT_AFTER` 决定。
+
+            抛异常的语义与 NVDA 后端**完全一致**（`rc != 0` 就 raise），由
+            `A11ySpeech.speak()` 兜住并**保持当前后端**、绝不静默降级。
+            """
+            if self._lib is None:
+                raise RuntimeError("ZDSR dll 未加载")
+            rc = self._lib.Speak(text, bool(interrupt))
+            # 与 NVDA 那一路同样的直接证据：这一行回答「读屏到底收到没有」。
+            # `CfgDiagLog=False` 时它不写；`said_result` 无论如何都记「调用前 / OK」。
+            A11yHost.diag("ZDSR Speak rc=%d len=%d" % (rc, len(text or "")))
+            if rc != 0:
+                raise RuntimeError("ZDSR Speak rc=%d" % rc)
+
+        def stop(self):
+            if self._lib is not None:
+                self._lib.StopSpeak()
 
 
     # ============================================================ 裸 COM 直调 SAPI —— **已删除**

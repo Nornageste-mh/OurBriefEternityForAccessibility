@@ -15,12 +15,15 @@ init -190 python:
     # 元信息
     A11yHost.GameName = "永恒与星辰与日常"
     A11yHost.GameVersion = "1.63"        # 依据：scripts/options.rpy 的 config.version 实查
-    A11yHost.PatchVersion = "0.0.1.5"
+    A11yHost.PatchVersion = "0.0.1.6"
 
-    # 后端：空 = 自动（NVDA -> SAPI）。
-    # ⚠ ZDSR（争渡）按维护者决定**不适配** —— 上游把它列为实验阶段
-    #   （README 明写它属「没做过的验证」）。本机实测同样印证：
-    #   InitTTS 返回 0，但判据 GetSpeakState 返回 2（读屏没有运行或没有授权）。
+    # 后端：空 = 自动（NVDA -> ZDSR -> SAPI(引擎同款)）。
+    # ⚠ 0.0.1.6 起 ZDSR（争渡读屏）**已接入链上第三级**（旧注释写着「按维护者决定
+    #   不适配」，那条立场已按实测改掉，依据见 `a11y_platform/01_speech.rpy` 的
+    #   `A11yZdsrBackend`）。判据是官方的 `GetSpeakState() in (3, 4)`：
+    #   本机实测 `InitTTS` 返回 0 而 `GetSpeakState` 返回 2（读屏没有运行或没有授权）
+    #   ⇒ 本机后端结论里 ZDSR 会显示为不可用并顺降，这不影响 NVDA 与 SAPI 两级。
+    #   ⚠ 「争渡在跑时真的出声（中文往返）」本机尚未实测 —— 不当成已验证可用。
     A11yHost.CfgSpeechBackend = ""
 
     # 朗读诊断日志：默认关闭 —— 打开后 log.txt 会出现剧本原文，
@@ -65,6 +68,21 @@ init -190 python:
     # （`input_backspace`），而本作确实有文本输入界面
     # （`scripts/screens/screen_input.rpy` 实查）—— 不抢原生键。
     A11yHost.CfgRereadKey = ["K_F5"]
+
+    # 朗读后端切换键。默认 **F9**，**支持修饰键写法** —— 与别的软件冲突时改成
+    # `["Alt+Shift+F9"]` 即可（等价于引擎的 `alt_shift_K_F9`，两种写法都认）。
+    #
+    # 为什么这里必须能改：F9 在本作里确实没人占用（实查表见
+    # `a11y_platform/06_keymap.rpy` 的文件头），但玩家的机器上可能别的东西占着它
+    # —— 读屏软件自己的快捷键、输入法、显卡驱动、别的补丁。引擎原生的键名写法是
+    # `alt_shift_K_F9`，让玩家记这个等于把这个配置项藏起来（写不出来就等于没得改）。
+    # 写法转换与「判不了就原样交回引擎」的纪律见 `06_keymap.rpy` 的 `_A11yKeySpec`。
+    #
+    # 按下之后：在**当前可用**的后端之间按
+    # 「自动 → Tolk → NVDA → 争渡读屏 → 引擎同款 SAPI → 回自动」切换，
+    # 不可用的**跳过并念出跳过了谁**，选中的档位记进引擎的 persistent
+    # ⇒ **下次启动仍然是这一档**（配置里的写死值优先于它，见 `A11ySpeech.boot_mode`）。
+    A11yHost.CfgBackendCycleKey = ["K_F9"]
 
 
 # ⚠ 下面这一段**不能**写成 `init -190 python in A11yHost:` 之后再引用 `A11yHost`：

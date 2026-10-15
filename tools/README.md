@@ -16,7 +16,8 @@
 | `probe_focus_key.py` | 播报去重键（「查不到位置」不得与「位置就是 None」撞车） | 两者混用 ⇒ 所有控件共用一个键 ⇒ **导航整片不朗读**而日志照刷 |
 | `probe_say_window.py` | 播报时间窗（同一句窗口内只念一次、不同句必须照念） | 有动画的界面里位置每帧都变 ⇒ 同一句 0.5 秒内被念十几遍（**抽搐**） |
 | `probe_bar_route.py` | 滑杆路由（Bar 必须进 `_bar_text`）与百分比三条取法 | `Bar` 不是 `Button` ⇒ 改好的函数**从没被调用**，滑杆念成 `Barbar` |
-| `probe_speech.py` | 朗读后端调度（含「说错话」回归点） | 后端自称「没有后端」却还在出声 |
+| `probe_speech.py` | 朗读后端调度（含「说错话」回归点）、四级链序、**后端切换键**（只停可用的 / 跳过要念出来 / 选择跨启动保留 / `"Alt+Shift+F9"` 写法）、以及真 `ZDSRAPI_x64.dll` 的**只读活体判据**（只调 `InitTTS`/`GetSpeakState`，不发声） | 后端自称「没有后端」却还在出声；后端自称「可用」却一句话都不出 |
+| `probe_keymap.py` | 键名与引擎调用约定（`compile_event`/`map_event`/`Keymap`）。⚠ **必须用游戏自带的运行时 python 跑**（普通 Python 里没有 pygame） | 键名写错 ⇒ 游戏起不来或那个键永不匹配；处理函数带参数 ⇒ 键永不响 |
 | `check_game_names.py` | 补丁引用的游戏侧名字是否真的存在 | 游戏更新后名字变了，补丁静默失效 |
 | `check_boot.py` | 启动后日志里**该出现的行**在不在 | 「没报错」不等于「跑起来了」 |
 
@@ -55,10 +56,10 @@
 
 | 脚本 | 当时查的问题 | 结论 |
 |---|---|---|
-| `probe_keymap.py` | 按键层到底怎么被调用、处理函数收到几个参数 | `renpy.Keymap` **无参调用**（`behavior.py:559→411`）；顺带查出 `renpy.pygame.KEYDOWN == 768`、Ren'Py 8 里没有 `pygame` 模块 |
+| `probe_keymap.py` | 按键层到底怎么被调用、处理函数收到几个参数 | `renpy.Keymap` **无参调用**（`behavior.py:559→411`）；顺带查出 `renpy.pygame.KEYDOWN == 768`、Ren'Py 8 里没有 `pygame` 模块。**现已并入自检套餐**（第 5 组专测 `"Alt+Shift+F9"` 这类写法能不能被引擎认） |
 | `probe_api.py` | 引擎各 API 是否存在、语义如何 | `config.interact_callbacks` 一次交互只跑一次；`periodic_callbacks` 每 50 ms；`tts.displayable()` 全引擎只有一个调用点 |
-| `probe_backend.py` | 三个朗读后端各自能不能用 | NVDA 控制器可用；裸 COM SAPI **崩溃**（`0xC0000005`），故不注册 |
-| `probe_dll.py` | NVDA 控制器 DLL 的导出与返回值 | `testIfRunning → 0`、`speakText → 0`（返回 0 不等于出声，这个坑见下） |
+| `probe_backend.py` | 三个朗读后端各自能不能用 | NVDA 控制器可用；裸 COM SAPI **崩溃**（`0xC0000005`），故不注册。争渡那一段 0.0.1.6 已按官方文档修正（签名三参、判据 `GetSpeakState() in (3,4)`） |
+| `probe_dll.py` | NVDA / 争渡 DLL 的导出与返回值 | `testIfRunning → 0`、`speakText → 0`（返回 0 不等于出声，这个坑见下）；争渡那份只导出 5 个名字（`InitTTS/Speak/GetSpeakState/StopSpeak/Braille`） |
 | `probe_nvda_race.py` | 「只有第一句出声」是否与取消朗读有关 | **未复现**，故补丁不假装已修；这是 F9 存在的理由 |
 | `probe_speak_seq.py` | 连续朗读的先后与打断行为 | 用于确认 `interrupt` 策略 |
 | `key_probe.ps1` | 早期用来抓按键事件（PowerShell 侧） | 已被 `probe_keymap.py` 取代 |

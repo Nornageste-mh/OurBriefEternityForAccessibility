@@ -59,6 +59,9 @@ param(
     [string]$RepoRoot = "",
     [string]$OutDir = "",
     [string]$Version = "",
+    # 可选：本机上已安装的游戏根目录。只用来把包里的 nvdaControllerClient64.dll
+    # 与「已经装进游戏的那一份」逐字节比对（第 8 步）。不给就跳过这项核对。
+    [string]$GameDir = "",
     [switch]$SkipGitCheck
 )
 
@@ -503,8 +506,11 @@ Write-Host ""
 Write-Host "== NVDA 客户端 dll =="
 Write-Host ("  来源: {0}" -f $dllSrc)
 Write-Host ("  SHA256: {0}" -f (Get-Sha256 $dllSrc))
-$installed = Join-Path (Join-Path "F:\Steam\steamapps\common" $GameDirNm) $NVDA_DLL_NAME
-if (Test-Path -LiteralPath $installed -PathType Leaf) {
+$installed = $null
+# 包内布局是 game\nvdaControllerClient64.dll → 装完落在 <游戏目录>\game\ 下，
+# 不是游戏根目录（这里曾经写错过层级）。
+if ($GameDir) { $installed = Join-Path (Join-Path $GameDir "game") $NVDA_DLL_NAME }
+if ($installed -and (Test-Path -LiteralPath $installed -PathType Leaf)) {
     $h1 = Get-Sha256 $dllSrc
     $h2 = Get-Sha256 $installed
     if ($h1 -eq $h2) {
@@ -514,7 +520,7 @@ if (Test-Path -LiteralPath $installed -PathType Leaf) {
         Write-Warning "  若确实要换 dll，请同步更新 THIRD-PARTY-NOTICES.md 里的说明与版本"
     }
 } else {
-    Write-Host "  游戏目录里没有已装的 dll，跳过一致性比对"
+    Write-Host "  没有给出 -GameDir（或那里面没装 dll），跳过一致性比对"
 }
 
 Write-Host ""

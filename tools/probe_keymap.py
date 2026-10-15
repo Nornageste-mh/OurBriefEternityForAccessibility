@@ -285,6 +285,113 @@ except Exception as e:
     print(f"  ⚠ 第 4 步跑不动（{type(e).__name__}: {e}）—— 跳过；"
           f"第 1-3 步已足够定论。")
 print()
+# ══════════════════════════════════════════════════════════════════
+# 5) ★ 后端切换键：默认 F9、以及「人话写法」`Alt+Shift+F9` 都必须真被引擎认
+# ══════════════════════════════════════════════════════════════════
+# 为什么单开一节：F9 在维护者这台机器上没人占用，但**玩家的机器上可能别的东西
+# 占着它**（读屏软件自己的快捷键、输入法、显卡驱动、别的补丁）。补丁因此让这个键
+# 能由逐作层配（`A11yHost.CfgBackendCycleKey`），并支持 `"Alt+Shift+F9"` 这种写法。
+#
+# ⚠ 这一节必须用**游戏自带的运行时**跑：键名合不合法只有引擎自己说了算
+#   （`compile_event` -> `getattr(pygame.constants, key)`），
+#   而 `probe_speech.py` 是拿普通 Python 跑的、碰不到 pygame。
+print("[5] ★ 后端切换键：默认 F9 + 人话写法 Alt+Shift+F9（抽 06_keymap.rpy 真源码）")
+
+import ast  # noqa: E402
+
+KM_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "mod", "game", "a11y_platform", "06_keymap.rpy")
+
+
+def _init_block(path, init_re):
+    """抽出一个 `init <n> python:` 块的整段源码（去掉那一级缩进）。"""
+    lines = open(path, encoding="utf-8").read().split("\n")
+    start = next((i for i, l in enumerate(lines) if re.match(init_re, l)), None)
+    if start is None:
+        raise SystemExit(f"{path} 里找不到 {init_re}")
+    body = []
+    for l in lines[start + 1:]:
+        if l.strip() and not l.startswith("    "):
+            break
+        body.append(l[4:] if l.startswith("    ") else l)
+    return "\n".join(body)
+
+
+def _grab(path, init_re, names):
+    """按名字取出 `init python:` 块里的**真源码片段**（ast 定位，不靠缩进猜）。
+
+    与 `probe_speech.py` 里那份是同一个做法：拿到的仍然是引擎将要执行的那段文本，
+    而不是在本探针里手抄一份副本（手抄的副本证明不了真代码的行为）。
+    """
+    src = _init_block(path, init_re)
+    out = {}
+    for node in ast.parse(src).body:
+        cand = [node.name] if isinstance(node, (ast.FunctionDef, ast.ClassDef)) else []
+        cand += [t.id for t in getattr(node, "targets", []) or []
+                 if isinstance(t, ast.Name)]
+        for n in cand:
+            if n in names:
+                out[n] = ast.get_source_segment(src, node)
+    missing = [n for n in names if n not in out]
+    if missing:
+        raise SystemExit(f"{path} 的 {init_re} 块里找不到 {missing}")
+    return out
+
+
+try:
+    _km_ns = {}
+    for _n, _code in _grab(KM_PATH, r"^init 1200 python:",
+                           ["_A11Y_MOD_ALIASES", "_A11Y_KEY_ALIASES",
+                            "_A11yKeySpec"]).items():
+        exec(compile(_code, f"<{_n}>", "exec"), _km_ns)
+    _KeySpec = _km_ns["_A11yKeySpec"]
+
+    _old_dev = renpy.config.developer
+    renpy.config.developer = True          # 非法名字要**抛异常**，不能静默变 (False)
+    for _raw, _want in [("F9", "K_F9"),
+                        ("Alt+Shift+F9", "alt_shift_K_F9"),
+                        ("Ctrl+Shift+R", "ctrl_shift_K_r"),
+                        ("Alt+Win+F9", "alt_meta_K_F9")]:
+        _got = _KeySpec(_raw)
+        _err = ""
+        try:
+            B.compile_event(_got, True)
+        except Exception as _e:
+            _err = f"{type(_e).__name__}: {_e}"
+        check(f"{_raw!r} -> {_want!r}，且引擎的 compile_event 认它",
+              _got == _want and not _err,
+              f"实得 {_got!r}" + (f"  编译失败 {_err}" if _err else ""))
+
+    # ★ 再走一遍**引擎启动时的那段代码**（`behavior.py:230-232` 的 `init_keymap()`）：
+    #   键名写错在这里就是 AttributeError ⇒ **游戏完全起不来**（断言 D 的事故背景）。
+    try:
+        renpy.config.keymap["A11yBackendCycle"] = [_KeySpec("Alt+Shift+F9")]
+        B.init_keymap()
+        check("把切换键设成 Alt+Shift+F9 之后，引擎的 init_keymap() 不报错", True)
+    except Exception as _e:
+        check("把切换键设成 Alt+Shift+F9 之后，引擎的 init_keymap() 不报错", False,
+              f"{type(_e).__name__}: {_e}")
+
+    _alt_shift_f9 = Ev(KC.K_F9, mod=KC.KMOD_ALT | KC.KMOD_SHIFT)
+    _alt_f9 = Ev(KC.K_F9, mod=KC.KMOD_ALT)
+    check("Alt+Shift+F9 命中", B.map_event(_alt_shift_f9, "A11yBackendCycle"))
+    check("光按 F9 **不**命中 —— 这正是「换个键避开冲突」的意思",
+          not B.map_event(ev_f9, "A11yBackendCycle"))
+    check("Alt+F9 也不命中（少一个修饰键不算同一个键）",
+          not B.map_event(_alt_f9, "A11yBackendCycle"))
+
+    # 换回默认档再核一遍：默认就是 F9，且不会被带修饰键的按键顶掉。
+    renpy.config.keymap["A11yBackendCycle"] = [_KeySpec("K_F9")]
+    B.init_keymap()
+    check("默认档 K_F9：光按 F9 命中", B.map_event(ev_f9, "A11yBackendCycle"))
+    check("默认档 K_F9：Alt+Shift+F9 不命中",
+          not B.map_event(_alt_shift_f9, "A11yBackendCycle"))
+    renpy.config.developer = _old_dev
+except SystemExit:
+    raise
+except Exception as _e:
+    print(f"  ⚠ 第 5 步跑不动（{type(_e).__name__}: {_e}）—— 跳过")
+print()
 
 print("=" * 72)
 print(f"结论：{'全部通过' if FAIL == 0 else str(FAIL) + ' 项不通过'}")
