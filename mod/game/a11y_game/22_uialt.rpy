@@ -35,6 +35,22 @@ init -55 python:
     #: 焦点跟踪每次焦点变化都会调用钩子，不去重会把日志刷满。
     _A11Y_CHOICE_SAID_LAST = [None]
 
+    class _A11yNoStateText(str):
+        """标记类：这条文案描述的是**动作**（一次性命令），不是「可选中项」。
+
+        平台层拿到查表结果后会给「已选中」的控件追加「：当前」。判据是引擎的
+        `Action.get_selected()`，正常按钮返回 None 不受影响；但本作 1.70 语言页
+        的 reset 键动作是 `SetGameLanguage("schinese")` —— 它是个**语言设置器**，
+        `get_selected()` 在简体界面下恒为 True（"当前语言就是简体中文"），于是
+        平台层把「重置为简体中文」也念成「重置为简体中文：当前」，而英文界面下
+        又因为不匹配而不带后缀（实机报告 D4 偏差：两种界面不一致）。
+
+        用**值类型**传这一位信息，而不是往控件上写状态（拉模型纪律：播报期间
+        不改控件），平台层只需 `getattr(txt, "_a11y_no_state", False)`。
+        """
+
+        _a11y_no_state = True
+
     #: 图片路径 -> 朗读文案。键可以写全路径 / 文件名 / 去后缀的词干。
     A11yHost.UiAltByImage = {
         # ---- 游戏内快捷菜单（对话界面常驻）----
@@ -165,6 +181,22 @@ init -55 python:
         ("gallery", "general_menu_page_8_normal.png"): "CG 第 8 页",
         ("gallery", "general_menu_page_9_normal.png"): "CG 第 9 页",
         ("gallery", "general_menu_page_10_normal.png"): "CG 第 10 页",
+
+        # ---- 1.70 新增：设置页页签 / 语言页页签 / 语言页的重置键 ----
+        # 页签的 x 会随界面语言变化（`l10n_ui_x()`：英语下 back/title 甚至挪到
+        # 2172/1888），位置表那套固定坐标在这里**不可靠**，所以必须走图片表。
+        # 图片上的字（维护者解包肉眼核对）：`语言 LANGUAGE` / `声音 SOUND` /
+        # `系统 BASIC`，官方 `tl/<lang>/` 有同名覆盖图。
+        "sys_menu_language_normal.png": "语言",
+        "sys_menu_sound_normal.png": "声音设置",
+        "sys_menu_basic_normal.png": "基础设置",
+        # ⚠ 语言页上的 reset 键动作是 `SetGameLanguage("schinese")`，含义不是
+        #   「重置为默认设置」—— 用**界面限定键**盖掉上面那条通用键
+        #   （平台层查表顺序：界面限定键 -> 图片键，见 08_uialt.rpy `_table_text`）。
+        #   文案用 `_A11yNoStateText` 包一层：它是「动作」不是「可选中项」，
+        #   平台层看到标记就不追加「：当前」（依据见本文件开头的类说明）。
+        ("setting_language", "sys_menu_reset_normal.png"):
+            _A11yNoStateText("重置为简体中文"),
     }
 
     #: 滑杆（Bar）文案。键 = 引擎的 preference 名（`Preference("...")` 里的那个串）。
@@ -286,6 +318,28 @@ init -55 python:
         ("music", 2062, 1095): "音声音量",        # bar Preference("mixer asmr volume")
     }
 
+    # ── 1.70 语言页（`screen setting_language`）的 14 个按钮 ────────────────
+    # ⚠ **只能走位置表，不能走图片表**：`sys_data_language_bo1_{chs,cht,jpn,eng}`
+    #   这 4 张图在「主语言 / 操作界面语言 / 文本语言」三个分组里**各出现一次**，
+    #   而 `sys_data_language_bo1_jpn_normal.png` 还被「配音语言」那个日本语
+    #   按钮复用（y=705）。图片表先于位置表命中，一旦给图名写了键，后两组
+    #   就会被念成第一组的名字（把「界面语言：English」念成「主语言：English」）。
+    #   坐标是源码字面常量（`screen_language.rpy` 的
+    #   `xpos left+(index%2)*452` / `ypos top+(index//2)*109`），不随界面语言
+    #   变化（变的是页签的 `l10n_ui_x()`，不是这一片网格），所以位置键可靠。
+    #   文案里的分组名与语言名由 `24_l10n.rpy` 在播报时翻成当前界面语言。
+    for _grp, _gx, _gy in (("main", 325, 270),
+                           ("ui", 1373, 270),
+                           ("text", 1373, 601)):
+        for _i, _lg in enumerate(("schinese", "tchinese", "japanese", "english")):
+            A11yHost.UiAltByPos[("setting_language",
+                                 _gx + (_i % 2) * 452,
+                                 _gy + (_i // 2) * 109)] = _a11y_lang_label(_grp, _lg)
+    A11yHost.UiAltByPos[("setting_language", 325, 705)] = \
+        _a11y_lang_label("voice", "schinese")
+    A11yHost.UiAltByPos[("setting_language", 777, 705)] = \
+        _a11y_lang_label("voice", "japanese")
+
 
     #: ★ 覆盖率核对用（`tools/coverage_uialt.py` 读这一段）：**位置表覆盖了哪些图**。
     #: 位置表按 `(界面, x, y)` 写、工具无法从坐标反推图名，所以在这里显式列出；
@@ -317,6 +371,13 @@ init -55 python:
         "sys_data_sound_char_have_normal.png",
         "sys_data_sound_char_not_normal.png",
         "sys_data_sound_char_test_normal.png",
+        # 1.70 语言页：4 张语言名图 + 1 张配音名图（**只走位置表**，理由见
+        # 上面那段；这里列出来是为了 `coverage_uialt.py` 对账时知道它们有文案）。
+        "sys_data_language_bo1_chs_normal.png",
+        "sys_data_language_bo1_cht_normal.png",
+        "sys_data_language_bo1_jpn_normal.png",
+        "sys_data_language_bo1_eng_normal.png",
+        "sys_data_language_bo2_cn_normal.png",
     ]
 
 
@@ -361,11 +422,13 @@ init -55 python:
             #   把一个有存档的位子报成空，会让玩家以为存档丢了。
             return ""
         if mt is None:
-            return "空"
+            return _A11yT("空")
         try:
-            return mt.strftime("%m月%d日 %H:%M")
+            # ★ 先翻**模板**再 strftime：英文界面下 `%m/%d %H:%M` 才是当地写法，
+            #   而整串「09月01日 20:31」在词表里查不到（1.63 上为恒等）。
+            return mt.strftime(_A11yT("%m月%d日 %H:%M"))
         except Exception:
-            return "有存档"
+            return _A11yT("有存档")
 
 
     def _a11y_asmr_label(row):
@@ -403,7 +466,9 @@ init -55 python:
         """
         try:
             if i == 0:
-                return "星弥" if data_group[0] == 0 else "时语"
+                # 角色名是**补丁从数据里挑出来的一个词**，跟着界面语言走
+                #（英文界面用拼音，日繁保留汉字；依据见 24_l10n.rpy 文件头）。
+                return _A11yT("星弥") if data_group[0] == 0 else _A11yT("时语")
             return str(data_group[i] + 1).zfill(3)
         except Exception:
             return ""
@@ -473,7 +538,7 @@ init -55 python:
             ch.ensure_announced(items)
         except Exception:
             A11yHost.log_exc("选项整批播报（焦点兜底）失败")
-        text = cap if cap else "选项 %d" % (n + 1)
+        text = cap if cap else _A11yT("选项 %d") % (n + 1)
 
         # ── 正向证据 ──────────────────────────────────────────────────────
         # 维护者只能靠耳朵验收，所以映射对不对必须**能从日志直接看出来**：
@@ -493,6 +558,33 @@ init -55 python:
         """逐作层兜底钩子。`ctx` 见契约层 `UiAltFor` 的说明。"""
         n = ctx.get("ordinal")
         total = ctx.get("total")
+
+        # ---- ★ 1.70 标题页的语言切换按钮 ----
+        # `TitleLanguageButton` 是游戏自己定义的 `ImageButton` 子类，图像来自
+        # `DynamicDisplayable`（`gui/localization/title_language_<art>_<state>.png`），
+        # 所以 `_keys_of()` 拿不到稳定的图片名、`_best_key()` 也给不出可读串，
+        # 只能靠**类型**认它。类名判据天然只对 1.70 成立（1.63 没有这个类），
+        # 因此老版本零影响。文案与主菜单批量播报那一项**共用同一个函数**，
+        # 保证两处念出来的字一模一样。
+        if type(w).__name__ == "TitleLanguageButton":
+            return _a11y_language_switch_alt()
+
+        # 兜底判据：1.70 标题画面的语言按钮在 (0,56)，图实测 268×93
+        # （`scripts/screens/screen_language.rpy:36-42` 的 xpos/ypos/xsize/ysize）。
+        # 为什么还要坐标：它的图像是 `DynamicDisplayable`（`title_language_<艺术字>_
+        # <状态>.png`，随当前主语言变），控件类型又依赖游戏侧类名 —— 万一将来
+        # 游戏换了类名或包了一层，坐标是**稳定的界面事实**。主菜单这一带除此
+        # 按钮外没有别的可聚焦控件（vbox 在 xpos 2452），所以不会误伤。
+        # `main_menu_extral` 也有同一个按钮（`screen_main_menu.rpy:176`）。
+        if str(ctx.get("screen") or "") in ("main_menu", "main_menu_extral"):
+            try:
+                _x = ctx.get("x")
+                _y = ctx.get("y")
+                if (_x is not None and _y is not None
+                        and 0 <= _x <= 300 and 40 <= _y <= 170):
+                    return _a11y_language_switch_alt()
+            except Exception:
+                pass
 
         # ---- ★ 选项界面的按钮 ----
         # 判据是**动作类名**：`ChoiceReturn` 是引擎 `menu` 语句为每个选项生成的
@@ -515,8 +607,8 @@ init -55 python:
             slot = n + 1
             state = _a11y_slot_state(slot)
             if state:
-                return "存档位 %d，%s" % (slot, state)
-            return "存档位 %d" % slot
+                return _A11yT("存档位 %d，%s") % (slot, state)
+            return _A11yT("存档位 %d") % slot
 
         # ---- 存读档格子：同一张图的**另一个按钮实例** ----
         # ⚠ 实机日志（`a11y_speech.log`）里出现过这种相邻对照：
@@ -548,8 +640,8 @@ init -55 python:
             if slot is not None:
                 state = _a11y_slot_state(slot)
                 if state:
-                    return "存档位 %d，%s" % (slot, state)
-                return "存档位 %d" % slot
+                    return _A11yT("存档位 %d，%s") % (slot, state)
+                return _A11yT("存档位 %d") % slot
 
         # ---- 音声鉴赏的曲目列表 ----
         if key == "extra_audio_list_bg_normal.png" and n is not None:
@@ -563,11 +655,12 @@ init -55 python:
         if key in ("stand_data_bo_left_normal.png",
                    "stand_data_bo_right_normal.png") and n is not None:
             if n < len(_STAND_GROUPS):
-                direction = "上一个" if "left" in key else "下一个"
+                direction = _A11yT("上一个") if "left" in key else _A11yT("下一个")
                 cur = _a11y_stand_value(n)
                 if cur:
-                    return "%s %s，当前 %s" % (_STAND_GROUPS[n], direction, cur)
-                return "%s %s" % (_STAND_GROUPS[n], direction)
+                    return _A11yT("%s %s，当前 %s") % (_A11yT(_STAND_GROUPS[n]),
+                                                     direction, cur)
+                return "%s %s" % (_A11yT(_STAND_GROUPS[n]), direction)
 
         # ---- 画廊：CG / 立绘缩略图 ----
         # 这些格子**画面上没有任何文字**（就是一张封面图），既没有可读标题，也不能
@@ -579,11 +672,11 @@ init -55 python:
             except Exception:
                 k = 0
             if k > 0:
-                return "第 %d 张" % k
+                return _A11yT("第 %d 张") % k
             # ⚠ 这里**不能**退化成用 `ordinal`：画廊每个缩略图的图**各不相同**，
             #   所以每一个自成一「组」，ordinal 恒为 0 —— 用它会报成
             #   「第 1 张」并**对每一张都说第 1 张**。宁可只说「图片」。
-            return "图片"
+            return _A11yT("图片")
         return None
 
 

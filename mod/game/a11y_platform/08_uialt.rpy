@@ -76,7 +76,25 @@ init -45 python:
     #: `_("selected")`，在中文界面下会被翻译成「选定」——所以两个都收。
     #: 这是一个「只影响一个裸状态词」的小筛子：任何一个**带名字**的 alt
     #: （例如引擎的 `"跳过没见过的 [text] selected"`）都不在里面，一字不动。
-    _A11Y_BARE_STATE_WORDS = {"selected": True, "选定": True, "已选定": True}
+    #: 状态词集合。
+    #:
+    #: ⚠ 1.70 起要收**四种语言**的译法：引擎 `__("selected")` 实测
+    #:   schinese `选定` / tchinese `選定` / japanese `選択中` / english `selected`
+    #:   （`tl/*/common.rpy` 各一条；`config.default_language = "english"`
+    #:   让「非中文界面」成了默认路径，不再是边角）。
+    #:   补丁主路径用 `_tts_all(raw=True)` 拿到的是**英文字面量** `" selected"`
+    #:   （`behavior.py:1204-1210`），所以英文那条一直有效；其余三条是为
+    #:   「有控件走 `raw=False`」准备的（引擎 `tts.py:428` 的 `displayable()`
+    #:   就是 raw=False）。`選択済み` 属同一族，一并收。
+    #:   原集合里的「已选定」在游戏 catalog / tl 里**不存在**（死词，实测），
+    #:   已删；`选定` 保留（schinese 的官方译法）。
+    _A11Y_BARE_STATE_WORDS = {
+        "selected": True,
+        "选定": True,
+        "選定": True,
+        "選択中": True,
+        "選択済み": True,
+    }
 
 
     def _A11yOrdinals(entries):
@@ -239,8 +257,14 @@ init -45 python:
                     pass
 
             # 查不到文案的记成作业清单（那份清单就是下一轮要补的表）
+            #
+            # ⚠ `_silent_widget` 的控件**不进清单**：引擎自己要求「别念我」的
+            #   控件（`SayBehavior` 每句台词新建一个）本来就该是静默的，把它们
+            #   记成「没有文案」会在日志里留下永久的假作业，实机报告 E7：
+            #   英文界面 `Unknown control (SayBehavior)`、日文界面中英混写。
+            #   判据与 `_read_text` 保持同一处（`_silent_widget`），不另起一套。
             for w, screen, pos, key in entries:
-                if self._has_real_text(w):
+                if self._has_real_text(w) or self._silent_widget(w):
                     continue
                 k = self._fallback_label(w)
                 known = self._unknown.setdefault(screen or "?", set())
@@ -335,7 +359,7 @@ init -45 python:
             # ④：兜底标识（引擎明确要求别念的控件除外）
             if self._silent_widget(w):
                 return ""
-            return self._fallback_label(w) or "未知控件"
+            return self._fallback_label(w) or _A11yT("未知控件")
 
         @staticmethod
         def _drop_bare_state(t):
@@ -443,7 +467,20 @@ init -45 python:
                 try:
                     txt = self._table_text(w, screen, pos)
                     if txt:
-                        return txt + self._state_suffix(w)
+                        # ★ 本地化在这里（不是在 `_table_text` 里）：这一处是
+                        #   图片表 / 位置表 / 逐作钩子 / 滑杆四条查表结果的**唯一出口**，
+                        #   只翻一次，就不会出现「表里翻了、钩子又翻」的双重替换。
+                        #   1.63 / 未挂 `Translate` 时它是恒等函数（零行为变化）。
+                        #
+                        # ★ 「：当前」不是所有控件都要：表值可以用带
+                        #   `_a11y_no_state` 标记的 str 子类声明「我是动作，不是
+                        #   可选中项」。实机依据：1.70 语言页 reset 键的动作是
+                        #   `SetGameLanguage("schinese")`，`get_selected()` 在简体
+                        #   界面下恒为 True ⇒ 被误念成「重置为简体中文：当前」，
+                        #   而英文界面又不带后缀（两种界面不一致，报告 D4）。
+                        suffix = "" if getattr(txt, "_a11y_no_state", False) \
+                            else self._state_suffix(w)
+                        return _A11yT(txt) + suffix
                 except Exception:
                     pass
             return ""
@@ -517,11 +554,11 @@ init -45 python:
             except Exception:
                 pass
             if bits:
-                return "未命名控件（%s）" % "，".join(bits)
+                return _A11yT("未命名控件（%s）") % _A11yT("，").join(bits)
             try:
-                return "未知控件（%s）" % type(w).__name__
+                return _A11yT("未知控件（%s）") % type(w).__name__
             except Exception:
-                return "未知控件"
+                return _A11yT("未知控件")
 
         # ------------------------------------------------------------ 查表
         def _table_text(self, w, screen=None, pos=None):
@@ -656,8 +693,10 @@ init -45 python:
             if label is None and pct is None:
                 return None
             if label is None:
-                label = "数值"
-            return label if pct is None else "%s %d%%" % (label, pct)
+                label = _A11yT("数值")
+            # ★ 先翻名字再拼百分比：整串「播放进度 53%」直接查词表是查不到的，
+            #   而名字本身（位置表 / 引擎给的 alt）才是可翻的那一半。
+            return _A11yT(label) if pct is None else "%s %d%%" % (_A11yT(label), pct)
 
         @staticmethod
         def _bar_pct(val):
@@ -755,7 +794,9 @@ init -45 python:
                 except Exception:
                     continue
                 if sel:
-                    return "：当前"
+                    # ★ 「：当前」也是补丁自产文案：1.70 起界面语言可切到英/日/繁，
+                    #   这里必须跟着翻（1.63 上 `Translate` 为 None ⇒ 原样）。
+                    return _A11yT("：当前")
                 if sel is not None:
                     return ""
             return ""
@@ -885,7 +926,11 @@ init -45 python:
             if here == self._focus_id:
                 if text and text != self._focus_text:
                     self._focus_text = text
-                    A11yHost.said("[alt] 值变化: " + text[:60])
+                    # 只翻「值变化」这个**日志短语**；`text` 本身在
+                    # `_read_text` 里已经过 `Translate`（实机报告 D4：英文会话里
+                    # 这一行仍写中文，是因为前缀没走本地化表；注意点语言页
+                    # reset 后界面已切回简体，此时 `text` 是中文属于**正常结果**）。
+                    A11yHost.said("[alt] " + _A11yT("值变化") + ": " + text[:60])
                     A11yHost.repeat.say(text, interrupt=True, record=False)
                 return
 

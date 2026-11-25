@@ -4,6 +4,226 @@
 "尚未查清"的东西写在 `无障碍可行性验证.md` 与 `docs/已验证版本.md` 里，
 不在这里冒充已修复。
 
+## 0.0.2.0 —— 支持游戏 **1.70**：四语言界面可朗读 + 朗读语言跟随界面语言
+
+版本号唯一来源是 `mod/game/a11y_game/90_plugin.rpy` 的 `A11yHost.PatchVersion`
+（`tools/make_release.ps1` 按它取值并强制 `^\d+\.\d+\.\d+\.\d+$`）。
+本版标签 `v0.0.2.0`（与代码同一次提交后打，断言 G 因而从「跳过」变成真比对）。
+
+1.70 的改动性质与以往不同：它**不是换了几张图**，而是整套**四语言系统**
+（`scripts/controls/localization.rpy` + `scripts/screens/screen_language.rpy` +
+`python-packages/obe_localization_catalog.py` + `tl/<lang>/` 资源）。
+对本补丁的直接影响有三类：
+
+| 影响 | 1.63 的假设 | 1.70 的事实 |
+|---|---|---|
+| 界面语言 | 只有中文（界面文案写死中文就够） | 主语言/界面语言/文本语言/配音语言**四个独立维度**，界面可切英/日/繁中 |
+| 语言页 | 没有这一页 | `setting_language` 有 **20 个可聚焦控件**（12 语言选项 + 2 配音 + 重置/返回标题/返回 + 3 页签） |
+| 标题画面 | 6 个图片按钮 | 多一个 `TitleLanguageButton`（`add _l10n_title_language_button`，**图是 DynamicDisplayable**） |
+
+分析全文见 [`docs/analysis-1.70.md`](docs/analysis-1.70.md)（反编译 1.70 脚本、逐屏核对坐标与动作）。
+
+### ① 版本自适应（`90_plugin.rpy`）
+
+`A11yHost.GameVersion` 不再写死 `"1.63"`，改成 `init 1300` 里**按运行期事实探测**：
+
+```python
+def _a11y_detect_game_version():     # 读 config.version，归一化成 "1.63" / "1.70"
+    ...                             # 未知版本：保留原值 + 写 WARNING，**不崩**
+```
+
+- 已知集合 `_A11Y_SUPPORTED_GAME_VERSIONS = ("1.63", "1.70")`；
+- 探测放在 `A11yHost.validate()` **之前**，所以契约日志里的版本号就是真版本；
+- 未知版本**只降级不崩溃**（按 1.63 基线继续，日志里写明「未登记」）——
+  玩家装的是 `1.70-demo` 之类时不该变成一片哑。
+- 依据：`scripts/options.rpy:264` `define config.version = "1.70"`（`_obe_demo_build` 为真时是
+  `"1.70-demo"`），`main.py:332` 的 `config.init()` 早于 init 块执行 ⇒ 运行时读得到。
+
+### ② 语言页 20 个控件全部有文案（`22_uialt.rpy`）
+
+查表顺序是 `(screen, 图名)` → 图名 → `(screen, x, y)`，本版按这个顺序各就各位：
+
+- **3 个页签 + 重置 + 返回标题 + 返回**：用**界面限定图片键**
+  （`("setting_language", "sys_menu_basic_normal.png")` 等）。为什么不用坐标：
+  这几个按钮的 xpos 是 `l10n_ui_x(...)`，**随界面语言变**（英语 `back=2172`、中文 `2098`），
+  一套坐标必然在某种语言下错位 —— 图片名才是语言无关的稳定事实。
+  `sys_menu_reset_normal.png` 在语言页的语义是「重置为简体中文」（`SetGameLanguage("schinese")`），
+  与设置页的「重置为默认设置」**不同**，所以用界面限定键分开，避免串台。
+- **12 个语言选项 + 2 个配音语言**：用位置键（这些坐标是**写死的字面量**，不随语言变）。
+  它们**禁止**用图名键：`sys_data_language_bo1_{chs,cht,jpn,eng}` 四张图在
+  主语言/界面语言/文本语言**三个分组里重复出现**，而 `bo1_jpn` 还被配音按钮复用 ——
+  图名键会把「界面语言：日本語」和「配音语言：日本語」混成一件事。
+  因此播报带**分组前缀**：`主语言：简体中文` / `界面语言：English` /
+  `文本语言：日本語` / `配音语言：中文`。前缀文案取自 `sys_data_language_text.png`
+  背景图里的四个标题（中/英/日/繁中四套，见 `24_l10n.rpy`）。
+- **不配文案的两个 `add`**：`sys_data_language_text.png`（背景上的分组标题）与
+  `sys_data_language_bo1_customize_{normal,confim}.png` 都是 `add` 不是按钮、
+  **不可聚焦**，硬塞 `alt` 只会制造误报。
+- 选中态：`SetGameLanguage.get_selected()` 存在 ⇒ 平台层 `_state_suffix` 自动加
+  「：当前」（本地化后是 `current` / `現在` / `目前`）。
+
+### ③ 标题画面的语言按钮（`22_uialt._a11y_ui_alt_for` + `31_main_menu._a11y_main_menu_items`）
+
+- 该按钮的图是 `DynamicDisplayable`，图名随当前主语言变；控件类型是游戏自定义的
+  `TitleLanguageButton`（`ImageButton` 子类）。**覆盖 `screen main_menu` 没有用**
+  （见踩过的坑第 21 条：补丁 `init offset = -10` 输给游戏的 `init 0`，从 0.0.1.0 起就没生效），
+  所以走**数据/钩子**：
+  - `UiAltFor` 第一判据按类名 `TitleLanguageButton`；**兜底**按「屏幕 ∈ {main_menu,
+    main_menu_extral} 且坐标落在 (0,56) 起的 268×93 区域」（坐标来自
+    `screen_language.rpy:36-42`）。主菜单那一带没有别的可聚焦控件，不会误伤。
+  - 文案：`切换语言，当前主语言：简体中文，回车切换`（英文界面下整句是英文）。
+  - 批量播报（`A11yHost.MainMenuItems`）在同一份数据源上取首项 `切换语言：X`，
+    与按钮 alt 同源，不会出现「按钮念A、批量念B」。
+
+### ④ 本地化层：`A11yHost.Translate`（L1 槽位）+ `24_l10n.rpy`（L3 实现）
+
+**契约**（`00_contract.rpy`）：
+
+```python
+Translate = None          # str -> str；None = 原样返回（1.63 / 未实现时零行为变化）
+def _A11yT(text): ...     # L1 唯一入口：None→原文；异常→原文（本地化失败绝不连累朗读）
+```
+
+**关键纪律：只翻「补丁自产的文案」。** 对话原文、选项正文、`style.alt` 里的游戏文字
+**一律不经过** `Translate` —— 那类是 IP 敏感的原文，必须原样朗读。
+平台层的落点是：查表结果（图片表/位置表/钩子/滑杆名）、「：当前」后缀、兜底控件名、
+开局播报、选项提示、按键提示。
+
+**实现**（`24_l10n.rpy`，`init -56`，早于 `22_uialt` 的 `-55` 以便它建表时能用）：
+
+1. 界面语言 = `_preferences.image_language or language or "schinese"`
+   （**跟随界面语言，不跟文本语言、不固定中文** —— 屏上写什么，耳朵就听到什么）；
+2. 先问游戏自己：`renpy.store.l10n_ui(text)`（有 `l10n_ui` 且**真的改动了**才采用）；
+3. 再查补丁词典 `_A11Y_L10N_DICT`（zh → {english, japanese, tchinese}）；
+4. 都没有 → 原样中文。
+
+**为什么必须有自备词典**：本作的界面文案是**画进 PNG 的**（`tl/<lang>/gui/**` 换图），
+游戏的 `obe_localization_catalog` 只覆盖引擎内建串 —— 实测补丁表里的 151 条自产文案中
+游戏词表只命中 **7 条**（自动/跳过/保存/取消/返回/开始游戏/读取游戏）。所以词典是手写的，
+条目来源逐类注明：游戏 `tl/` 里有的抄游戏（如 `开始游戏→New Game`）、
+没有的按图片上的实际文字与官方英/日译法拟定。语言名（简体中文/繁體中文/日本語/English/中文）
+永远写本名，**不翻译**。
+
+### ⑤ 只在 1.70 才暴露的五处隐藏回归（都带运行时探测，1.63 不变）
+
+1. **无配音角色推导恒为空**（`20_textproc.rpy`）。1.70 的角色全写成
+   `Character(lambda: l10n_text("名字"), dynamic=True, ...)`，`Character.__init__` 把
+   `name` 原样存成 **callable** ⇒ 原来那句 `if not isinstance(name, str): continue`
+   让 16 个角色一个都扫不到，`SpeakerIsUnvoiced` 恒 False（主角与部分配角会被当成有配音、
+   于是**整句不念**）。修法：判据改成**运行时角色对象上的 `voice_tag`**
+   （没有 tag 才没有 `audio/voice/{id}.ogg`），名字 callable 时调一次取当前语言显示名，
+   缓存带「语言指纹」（英文界面下名字是 Elysia/Stella，键会变）。
+2. **英文引号没被剥掉**（`20_textproc.rpy` 的 `SUBS`）。文本语言=english 时台词引号是
+   `“ ”`（`localization.rpy:86-90`），而 `SUBS` 只剥「『」』 ⇒ 英文台词会多念两个词。
+   补上双弯引号；`‘ ’` **故意不动**（英文里的 `’` 同时是撇号，剥了会把 don’t 变成 dont）。
+3. **状态词表缺日文/繁中写法**（`08_uialt.rpy`）。引擎 `__("selected")` 实测：
+   简中 选定 / 繁中 選定 / 日文 選択中 / 英文 selected。原先只滤 `selected`/`选定`/`已选定`，
+   现补 `選定`、`選択中`、`選択済み`，删掉并不存在的「已选定」。
+4. **1.70 下所有「有角色名」的台词都不朗读**（`10_renpy_adapter.rpy` 的
+   `_speaker_name()`）。第 1 条修的是逐作层的推导缓存，**平台层这个唯一出口漏了**：
+   它读 `store._last_say_who` 拿到的 `Character.name` 在 1.70 是 **callable**
+   （`Character(lambda: l10n_text("时语"), dynamic=True)`），于是返回**函数对象** →
+   `announce_dialogue` 里 `who.strip()` 抛 `AttributeError` → 被 `_flush_dialogue`
+   的 `except` 吞成「对话朗读异常」→ **每一句有名字的台词都静音**。旁白 `who` 为空
+   反而正常，所以从菜单/旁白试听**看不出来**。修法：新增
+   `_resolve_name()`（callable 才调用、非字符串返回空串，1.63 的字符串名零影响），
+   `_speaker_name()` 两个出口都走它；`announce_dialogue` 入口再把 `who` 归一成
+   字符串兜底（宁可丢名字也绝不让整句消失）；并在**每个说话人第一次出现**时写一行
+   always-on 日志 `说话人解析: 原始='xx_' -> 显示名='时语'`，让现场能从 log.txt
+   直接确认对话链路活着。
+5. **主菜单批量播报半中半英**（`31_main_menu.rpy` 的 `_a11y_main_menu_items()`）。
+   该项原先返回中文裸串，而平台层只翻**模板 + 分隔符**（选项名归逐作层管，因为
+   L1 不知道本作菜单有哪些按钮、也拿不到中文原文）⇒ 英文/日文/繁中界面下刚进标题
+   画面会念 `Main menu. 开始游戏, 继续游戏, …`。修法：items 里 5 个固定条目全部
+   过 `_A11yT(...)`；1.70 的「切换语言：X」项**不再二次包**（它已由 `24_l10n`
+   按当前语言给出译文，再翻一次只是白跑）。顺带把 `_fallback_label` 里写死的
+   `"，".join(bits)` 也换成 `_A11yT("，").join(bits)`（英文下分隔符该是逗号）。
+
+### ⑥ 工具与自检的变化
+
+- `tools/install.ps1`：`$OurPrefixes` 增加 `24_l10n`（断言 H 机械拦住「清单漂了 ⇒
+  旧 `.rpyc` 不清 ⇒ 改了没反应」）；
+- `tools/coverage_uialt.py`：识别 `idle "前缀" + 变量 + ".png"` 这类**运行时拼图名**，
+  按前缀处理（1.70 语言页/配音页就是这种写法）。否则报告里会冒出一个永远对不上的假图名；
+- `tools/check_game_names.py`：`os.path.relpath` 跨盘符会抛 `ValueError`（仓库在 C:、
+  游戏装在 D: 是常态），改成退化绝对路径。
+
+### ⑦ 第二轮 verifier 回修（1.70 实机报告 D3 与三项偏差）
+
+1.70 实机（机器可读层）验证出一条 FAIL 与三条偏差，都在 0.0.2.0 内回修：
+
+- **FAIL D3：「切换语言」不随界面语言翻译**（`24_l10n.rpy` 的
+  `_a11y_language_switch_alt()` / `_a11y_language_switch_item()`）。它们直接
+  `"中文模板" % 名字`，而词表的键是**模板**（`切换语言：%s`），翻**格式化后**的串必然 miss。
+  改成先 `_A11yT(模板)` 再 `%`（语言名仍是本名，不翻）。这是「先翻还是先格式化」的次序坑。
+- **偏差①：「值变化」日志前缀没本地化**（`08_uialt.rpy` 的 `_track_focus`）。前缀是补丁自产文案，
+  改成 `"[alt] " + _A11yT("值变化") + ": "`；`text` 本身早已过 Translate，不再二次处理
+  （点语言页 reset 会把界面切回简体，那时 `text` 是中文属正常）。
+- **偏差②：语言页 reset 的「：当前」前后不一致**（简体有、英文没有）。根因是 reset 的动作
+  `SetGameLanguage("schinese")` 的 `get_selected()` 在简体界面恒为 True ⇒ 被当成可选中项加了后缀。
+  用值类型标记 `_A11yNoStateText(str)`（`_a11y_no_state = True`）让 `_read_text` 出口跳过状态后缀，
+  reset 现在两种语言都只念「重置为简体中文」，与「一次性动作」语义一致。
+- **偏差③：SayBehavior 每句都被记成「没有文案的控件」**。`_read_text` 里早有 `_silent_widget` 静音，
+  但 `_scan()` 收集「未知控件」清单时没跳过它 ⇒ 永久假作业，实机日志里因此出现
+  `Unknown control (SayBehavior)` 与中日混写。`_scan` 判据改成
+  `if self._has_real_text(w) or self._silent_widget(w): continue`。
+  引擎侧的 `Unknown control` 字样本补丁不接管：`renpy/display/tts.py` 只有 `TTSRoot`，
+  没有这条串，那条文案是补丁词表 `未知控件（%s）` 的兜底翻译。
+- **残留项：「自定义」状态下的语言名是裸中文**（verifier 二轮复测 §3.11）。主语言=自定义时，
+  `_a11y_language_current_name()` 的 custom 分支直接返回中文，英/日句子里就嵌了一个「自定义」。
+  改为 `_A11yT(_A11Y_L10N_CUSTOM)`（词表已有 `自定义→Custom/カスタム/自訂`，与
+  `title_language_custom_*` 图上的实际文字一致）；四个语言名仍是本名不翻，简体界面下恒等。
+  **已实机复测（ebd45bc）：英 `Custom`／日 `カスタム`／简中 `自定义`；证据见 `docs/verification-1.70.md` §3.11 R6。**
+- 顺带：`tools/coverage_uialt.py` 的 `os.path.relpath` 跨盘符崩溃，与 `check_game_names.py`
+  同款修法（`_rel()` 退化绝对路径）。
+
+### 取证方式（可重复执行）
+
+```powershell
+python tools\lint_patch.py            # 12 条断言全绿（A0/A/A2/B/C/D/E/F/G/H/I/J）
+python tools\coverage_uialt.py --screens <反编译>\scripts\screens `
+                               --table mod\game\a11y_game\22_uialt.rpy   # 100% 覆盖
+python tools\check_game_names.py --scripts <反编译>\scripts --game-dir "<游戏目录>"
+powershell -ExecutionPolicy Bypass -File tools\make_release.ps1 -OutDir dist   # 发布包核对（dist/ 已被 .gitignore 忽略）
+```
+
+发布包核对（`tools\make_release.ps1`）：解析出的版本号 0.0.2.0 与 `git describe` 的标签一致；
+产出 `dist\OurBriefEternityA11y-0.0.2.0.zip`；包内 **19 个条目 = 12 个 `.rpy`**（含 `24_l10n.rpy`）+ NVDA dll + 2 份争渡 dll
++ 2 份玩家文档 + 2 份许可证文本，全部使用 `/` 且在清单内；产物写在临时目录，**不入库**。
+
+对话链路是否活着，直接看游戏目录 `log.txt` 里**每个说话人第一次出现**时那行：
+
+```
+[A11y] … 说话人解析: 原始='xx_' -> 显示名='时语'
+```
+
+有这一行且显示名非空 ⇒ 名字解析通了；显示名是 `''` 而原文有名字 ⇒ 动态名求值失败
+（该行会被当旁白整句朗读，正文不会丢）。
+
+1.63 侧**没有实机回归证据吗**：有代码级依据 —— 五处 1.70 专用行为都挂在
+`renpy.has_screen(...)` / 类名 / `l10n_ui` 存在性上，1.63 上全部走原路径
+（`Translate` 槽为 None ⇒ `_A11yT` 原样返回）。
+
+### 未验证（不许写成已修复）
+
+- **1.70 实机（机器可读层）已验过，但还没有人耳试听**：verifier 在 1.70 实机上按
+  `docs/verification-1.70.md` 的清单验过 —— 语言页 19/19 控件（从主菜单进入时无「标题」按钮，故 19）、
+  主菜单 7 项批量播报、标题语言按钮焦点、对话链路（含动态角色名）逐句朗读、存读档槽位、
+  快速菜单、F5 重读全部 PASS；报告里唯一 FAIL（「切换语言」不随界面语言翻译）已在本版修掉。
+  仍待耳朵：英文/日文界面下词典条目是否够用、连听是否自然。
+- **英语默认路径**：1.70 的 `config.default_language = "english"`（`options.rpy:269`），
+  新存档默认英文界面 ⇒ 上面那条不是边角情况，而是**默认体验**。
+- 词典里自拟的日文/繁中条目（游戏 `tl/` 里没有的部分）没有母语者校对。
+
+### 教训
+
+- **「图名唯一」不等于「语义唯一」。** 四张语言图在三个分组里重复出现，
+  同一张 `bo1_jpn` 还兼任配音按钮 —— 位置表 + 分组前缀才是唯一正确解。
+- **覆盖 `screen` 要先问「谁的 init 更晚」。** 负偏移的覆盖版可能从第一版起就是死的，
+  而「看起来有效」是别的机制（图片表/批量播报）在托底。
+- **1.70 把「名字」变成了函数。** 任何拿角色显示名当键的代码在 1.70 都会静默失效，
+  判据要落在引擎自己的事实上（`voice_tag`），而不是字符串。
+
 ## 0.0.1.7 —— 争渡 dll **自动查找**（注册表）+ 版本不匹配自动换下一份 + 发布包带兜底副本
 
 版本号唯一来源是 `mod/game/a11y_game/90_plugin.rpy` 的 `A11yHost.PatchVersion`
@@ -730,7 +950,7 @@ renpy/display/behavior.py:1203        rv += " selected" if raw else " " + renpy.
 
 ### 已知缺口（记录在案，**未修**；都不是回归）
 
-- **立绘页「当前值」播报是死的**：`08_uialt.py` 的查表次序是「图片表 → 位置表 → 钩子」，
+- **立绘页「当前值」播报是死的**：`08_uialt.rpy` 的查表次序是「图片表 → 位置表 → 钩子」，
   而图片表里已经有 `stand_data_bo_left/right_normal.png` → 「上一个/下一个」，
   所以 `UiAltFor` 里「组名 + 方向 + 当前值」那段（含 `_a11y_stand_value` 与
   `_STAND_GROUPS`）**永远不会被调用**。要接通只需删掉图片表里那两条、由钩子接管

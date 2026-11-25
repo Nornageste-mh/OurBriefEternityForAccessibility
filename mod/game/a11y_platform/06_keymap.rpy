@@ -426,7 +426,7 @@ init 1200 python:
                 A11yHost.key_cue()
                 A11yHost.said("[按键] 整屏朗读")
                 if not A11yHost.rpy.read_screen():
-                    A11yHost.repeat.say("朗读界面失败。", record=False)
+                    A11yHost.repeat.say(_A11yT("朗读界面失败。"), record=False)
             except Exception:
                 A11yHost.log_exc("整屏朗读异常")
 
@@ -453,7 +453,7 @@ init 1200 python:
                 A11yHost.rpy.probe_report("手动")
                 A11yHost.log("=== 快照结束（内容见 log.txt） ===")
                 # 给一句听觉确认：快照本身写在文件里，但玩家要知道「按到了」。
-                A11yHost.repeat.say("已记录现场快照。", record=False)
+                A11yHost.repeat.say(_A11yT("已记录现场快照。"), record=False)
             except Exception:
                 A11yHost.log_exc("现场快照异常")
 

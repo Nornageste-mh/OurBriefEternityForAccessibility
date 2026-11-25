@@ -53,8 +53,8 @@ $SrcRoot  = Join-Path $RepoRoot "mod\game"
 #         会比对这份清单与 `mod\game\**\*.rpy` 的实际文件名，对不上就红。
 $OurPrefixes = @("00_contract", "01_speech", "05_repeat",
                  "06_keymap", "08_uialt", "10_renpy_adapter",
-                 "20_textproc", "22_uialt", "30_choice", "31_main_menu",
-                 "90_plugin")
+                 "20_textproc", "22_uialt", "24_l10n", "30_choice",
+                 "31_main_menu", "90_plugin")
 
 function Write-Step($m) { if (-not $Quiet) { Write-Host $m } }
 

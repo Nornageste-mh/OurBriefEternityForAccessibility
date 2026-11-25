@@ -170,8 +170,10 @@ init -60 python:
             for i, it in enumerate(self._items, 1):
                 cap = self._caption_of(it)
                 if cap:
-                    parts.append("%d．%s" % (i, cap))
-            parts.append("按数字键选择。")
+                    # ★ 只翻**序号模板**；`cap` 是选项正文（游戏内容，可能已由
+                    #   引擎翻译过），绝不送进本地化。
+                    parts.append(_A11yT("%d．%s") % (i, cap))
+            parts.append(_A11yT("按数字键选择。"))
             msg = " ".join(parts)
             # 正向证据：整批播报**走的是哪条路**。上一轮 6032 行日志里一行
             # 选项播报都没有，而当时无法从日志分辨「钩子没触发」还是
@@ -238,20 +240,20 @@ init -60 python:
             if not self._items:
                 return
             if n < 1 or n > len(self._items):
-                A11yHost.repeat.say("没有第 %d 个选项。" % n, record=False)
+                A11yHost.repeat.say(_A11yT("没有第 %d 个选项。") % n, record=False)
                 return
             item = self._items[n - 1]
             cap = self._caption_of(item)
-            A11yHost.repeat.say("已选择 %d．%s" % (n, cap), interrupt=True)
+            A11yHost.repeat.say(_A11yT("已选择 %d．%s") % (n, cap), interrupt=True)
             try:
                 act = getattr(item, "action", None)
                 if act is None:
-                    A11yHost.repeat.say("这个选项无法激活。", record=False)
+                    A11yHost.repeat.say(_A11yT("这个选项无法激活。"), record=False)
                     return
                 renpy.display.behavior.run(act)
             except Exception:
                 A11yHost.log_exc("激活第 %d 个选项失败" % n)
-                A11yHost.repeat.say("激活选项失败。", record=False)
+                A11yHost.repeat.say(_A11yT("激活选项失败。"), record=False)
 
     A11yHost.choice = A11yChoice()
 

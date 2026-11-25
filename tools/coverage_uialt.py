@@ -29,6 +29,19 @@ DEF_SCREENS = os.path.join(REPO, "extracted", "scripts", "scripts", "screens")
 DEF_MORE = [os.path.join(REPO, "extracted", "scripts", "scripts")]
 DEF_TABLE = os.path.join(REPO, "mod", "game", "a11y_game", "22_uialt.rpy")
 
+
+def _rel(p):
+    """相对仓库根显示路径。跨盘符时 `os.path.relpath` 会抛 `ValueError`。
+
+    实测：仓库在 C:、反编译脚本/游戏在 D: 是**常态**（维护者机器就是这样），
+    1.70 核对时这里直接崩过（`ValueError: path is on mount 'D:', start on
+    mount 'C:'`）。拿不到相对路径就原样打印绝对路径 —— 显示用，不是判据。
+    """
+    try:
+        return os.path.relpath(p, REPO)
+    except ValueError:
+        return p
+
 #: 只匹配**独立**的 `idle`，不能把 `selected_idle` / `hover_idle` 也算进来。
 #:
 #: ⚠ 这条是踩出来的：第一版用 `idle\s+"..."`，于是 `selected_idle "..._confim.png"`
@@ -36,6 +49,11 @@ DEF_TABLE = os.path.join(REPO, "mod", "game", "a11y_game", "22_uialt.rpy")
 #: 而它们其实是**同一个按钮的选中态图**，idle 那条早就写进表里了。
 IDLE_RE = re.compile(r'(?<![_a-zA-Z])idle\s+"([^"]+)"')
 IDLE_FMT_RE = re.compile(r'(?<![_a-zA-Z])idle\s+"([^"]*?)\{\}[^"]*"\.format')
+#: `idle "前缀" + 变量 + ".png"` —— 图名是**运行时拼**出来的
+#: （1.70 语言页/配音页就是这种写法：`idle button_art + "_normal.png"`）。
+#: 这种必须按「前缀」处理，否则正则只能捕获到引号里的那截前缀，
+#: 报告里会出现一个永远对不上任何表项的假图名。
+IDLE_CONCAT_RE = re.compile(r'(?<![_a-zA-Z])idle\s+"([^"]*)"\s*\+')
 LITERAL_RE = re.compile(r'"([^"]*\.(?:png|webp|jpg|jpeg))"')
 
 #: 补丁**整屏覆盖**掉的界面：原版那些 imagebutton 不会被实例化，
@@ -84,6 +102,11 @@ def scan_images(screens_dir):
                     pre = mfmt.group(1).replace("\\", "/").rsplit("/", 1)[-1]
                     found.setdefault("<前缀: %s>" % pre, []).append(f"{n}:{i}")
                     continue
+                mcat = IDLE_CONCAT_RE.search(line)
+                if mcat:
+                    pre = mcat.group(1).replace("\\", "/").rsplit("/", 1)[-1]
+                    found.setdefault("<前缀: %s>" % pre, []).append(f"{n}:{i}")
+                    continue
                 m = IDLE_RE.search(line)
                 if m:
                     img = m.group(1).replace("\\", "/").rsplit("/", 1)[-1]
@@ -110,8 +133,8 @@ def main():
     keys = table_keys(args.table)
     pos_keys = pos_covered_images(args.table)
     print("=" * 72)
-    print(f"界面目录: {os.path.relpath(args.screens, REPO)}")
-    print(f"文案表  : {os.path.relpath(args.table, REPO)}")
+    print(f"界面目录: {_rel(args.screens)}")
+    print(f"文案表  : {_rel(args.table)}")
     print("=" * 72)
     print(f"脚本里出现的 idle 图：{len(found)} 种    "
           f"图片表：{len(keys)} 种    位置表声明：{len(pos_keys)} 种\n")

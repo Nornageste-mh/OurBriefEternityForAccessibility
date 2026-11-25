@@ -49,6 +49,37 @@ init offset = -10
 #   指令，不能让顶层容纳 `def`。这条已由断言 A2 机械拦住（tools/lint_patch.py）。
 init -10 python:
 
+    def _a11y_demo_unlocked():
+        """1.70 起主菜单的「特殊模式」解锁条件多了一项 `obe_demo`。
+
+        原作 `scripts/screens/screen_main_menu.rpy:121` 是
+        `if persistent.gallery_unlocked or obe_demo:`（1.70 新增的 Demo 版开关，
+        `scripts/options.rpy` 里 `define -999 obe_demo = _obe_demo_build`，
+        正式版恒为 False）。1.63 上没有这个变量，所以**必须**用 getattr 探测；
+        取不到按 False 处理，与正式版一致。
+        """
+        try:
+            if persistent.gallery_unlocked:
+                return True
+        except Exception:
+            return False
+        try:
+            return bool(getattr(renpy.store, "obe_demo", False))
+        except Exception:
+            return False
+
+    def _a11y_has_title_language_button():
+        """1.70 的标题页语言切换按钮是否存在（`screen title_language_button`）。
+
+        ⚠ 这个探测必须发生在**界面求值时**，不能在 `init` 期引用：
+        `screen title_language_button` 由游戏自己的 `screen_language.rpy` 定义，
+        1.63 上根本不存在，`use` 一个不存在的界面会让整个主菜单报错。
+        """
+        try:
+            return bool(renpy.has_screen("title_language_button"))
+        except Exception:
+            return False
+
     def _a11y_main_menu_items():
         """主菜单条目 —— **只列「引擎真的能聚焦到」的那些**。
 
@@ -66,17 +97,39 @@ init -10 python:
         `define persistent.gallery_unlocked = False`，剧情里 4 处置真；
         原作界面判断在 `scripts/screens/screen_main_menu.rpy:118`，
         与本文件的 screen 分支逐字一致。
+
+        ── 1.70 的改动 ────────────────────────────────────────────────────
+        1.70 标题页多了一个语言切换按钮（`TitleLanguageButton`，位于 (0,56)），
+        比 vbox（ypos 115）更靠上 ⇒ 按**视觉 y,x 次序**它是第一项。批量播报
+        与逐项焦点播报必须用**同源**文案，所以两处都取
+        `24_l10n.rpy` 的当前主语言名（批量用短句 `_a11y_language_switch_item()`，
+        焦点用长句 `_a11y_language_switch_alt()`）。
+
+        ⚠ 本文件的 `screen main_menu` 是**死代码**（游戏 `screen_main_menu.rpy`
+        在 init 0 定义，本文件 `init offset = -10` 永远被盖掉），保留它是
+        历史原因；真正的主菜单朗读走 `22_uialt.rpy` 的图片表 + 本函数 +
+        平台层的批量播报。所以**不要**依赖这里的 screen 语句去补 1.70 的东西。
         """
-        items = ["开始游戏", "继续游戏", "读取游戏", "系统设置"]
-        try:
-            if persistent.gallery_unlocked:
-                items.append("特殊模式")
-        except Exception:
-            # 取不到就按**画面上的默认状态**（未解锁）处理：
-            # 宁可少报一项，也绝不报一个玩家按不到的项
-            # ——错报会让玩家按回车去做另一件事，比少报危险得多。
-            pass
-        items.append("退出游戏")
+        items = []
+        # 1.70 才有这个按钮；1.63 上探测失败 ⇒ 清单保持原样（零行为变化）。
+        if _a11y_has_title_language_button():
+            # 注意：这一项**已经**由 `_a11y_language_switch_item()` 翻好
+            # （它读当前界面语言给「切换语言：English」），**不要**再包
+            # `_A11yT` —— 二次翻译会把英文串当中文键去查词典，白跑一趟。
+            items.append(_a11y_language_switch_item())
+        # 其余条目是**补丁自产的中文文案**，必须在这里翻好：
+        # 平台层只翻模板与分隔符（见 `10_renpy_adapter.announce_main_menu`），
+        # 选项名由逐作层负责 —— 否则英文界面下刚进标题画面会念出
+        # 「Main menu. 开始游戏, 继续游戏, ...」这种半中半英的句子。
+        items.extend([
+            _A11yT("开始游戏"),
+            _A11yT("继续游戏"),
+            _A11yT("读取游戏"),
+            _A11yT("系统设置"),
+        ])
+        if _a11y_demo_unlocked():
+            items.append(_A11yT("特殊模式"))
+        items.append(_A11yT("退出游戏"))
         return items
 
     # 把清单交给平台层 —— 平台层不知道本作主菜单有哪些按钮（分层要求）
@@ -104,6 +157,16 @@ screen main_menu(force=False):
         add "titlenew_copyright" at main_menu_bg_transform
         add "title_logo_a" at main_menu_bg_transform
 
+    # ── 1.70 标题页的语言切换按钮 ────────────────────────────────────────────
+    # 原作 1.70 在背景块之后 `use title_language_button`（含 `main_menu_extral`），
+    # 位置与 1.63 的视觉完全不变，所以这里照抄、只加运行期探测保护：
+    # 1.63 上这个 screen 不存在，直接 `use` 会让整个主菜单解析失败。
+    # 按钮实例是 `TitleLanguageButton`（`ImageButton` 子类），没有 `alt`、
+    # 图像来自 `DynamicDisplayable`，所以文案由 `22_uialt.rpy` 的
+    # `_a11y_ui_alt_for` 按**类型名**兜底（与本文件批量播报共用同一句）。
+    if _a11y_has_title_language_button():
+        use title_language_button
+
     vbox:
         # ⚠ `group_alt` 是**样式属性**，必须挂在 displayable 上，不能当 screen
         #   语句层级的关键字 —— 后者被引擎直接拒绝：
@@ -117,7 +180,7 @@ screen main_menu(force=False):
         xanchor 1.0
 
         imagebutton:
-            alt "开始游戏"
+            alt _A11yT("开始游戏")
             idle "gui/custom2/title/title_menu_main_start_normal.png"
             hover "gui/custom2/title/title_menu_main_start_click.png"
             at main_menu_show_btn(1.0 if not force else 0.0)
@@ -127,7 +190,7 @@ screen main_menu(force=False):
             action [PlayRandomSystemVoice(10), Start()]
 
         imagebutton:
-            alt "继续游戏"
+            alt _A11yT("继续游戏")
             idle "gui/custom2/title/title_menu_main_continue_normal.png"
             hover "gui/custom2/title/title_menu_main_continue_click.png"
             insensitive "gui/custom2/title/title_menu_main_continue_locked.png"
@@ -138,7 +201,7 @@ screen main_menu(force=False):
             action SafeContinue()
 
         imagebutton:
-            alt "读取游戏"
+            alt _A11yT("读取游戏")
             idle "gui/custom2/title/title_menu_main_load_normal.png"
             hover "gui/custom2/title/title_menu_main_load_click.png"
             activate_sound persistent.button_activate_sound
@@ -150,7 +213,7 @@ screen main_menu(force=False):
         add "title_divider" at main_menu_show_btn(1.3 if not force else 0.3)
 
         imagebutton:
-            alt "系统设置"
+            alt _A11yT("系统设置")
             idle "gui/custom2/title/title_menu_main_system_normal.png"
             hover "gui/custom2/title/title_menu_main_system_click.png"
             hover_sound persistent.button_hover_sound
@@ -158,9 +221,11 @@ screen main_menu(force=False):
             xalign 1.0
             action [PlayRandomSystemVoice(1), ShowMenu("preferences")]
 
-        if persistent.gallery_unlocked:
+        # 1.70：解锁条件多了 `or obe_demo`（Demo 版），判断集中在
+        # `_a11y_demo_unlocked()` 里，保证与上面那份清单**同源**。
+        if _a11y_demo_unlocked():
             imagebutton:
-                alt "特殊模式"
+                alt _A11yT("特殊模式")
                 idle "gui/custom2/title/title_menu_main_extra_normal.png"
                 hover "gui/custom2/title/title_menu_main_extra_click.png"
                 activate_sound persistent.button_activate_sound
@@ -172,14 +237,14 @@ screen main_menu(force=False):
             # 原作在这里放的是**不可点**的锁定图（`add`，不是 `imagebutton`）。
             # 无障碍层保持不变，只补一句朗读说明它为什么按不了。
             add "gui/custom2/title/title_menu_main_extra_locked.png":
-                alt "特殊模式（尚未解锁）"
+                alt _A11yT("特殊模式（尚未解锁）")
                 at main_menu_show_btn(1.5 if not force else 0.5)
                 xalign 1.0
 
         add "title_divider" at main_menu_show_btn(1.6 if not force else 0.6)
 
         imagebutton:
-            alt "退出游戏"
+            alt _A11yT("退出游戏")
             idle "gui/custom2/title/title_menu_main_exit_normal.png"
             hover "gui/custom2/title/title_menu_main_exit_click.png"
             activate_sound persistent.button_activate_sound

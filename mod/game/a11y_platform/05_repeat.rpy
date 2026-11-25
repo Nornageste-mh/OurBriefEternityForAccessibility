@@ -140,11 +140,15 @@ init -103 python:
         def repeat(self):
             """重读最后一条。空缓冲区时给出提示，而不是一片安静。"""
             if not self._last:
-                return self.say("没有可重读的内容", record=False)
+                return self.say(_A11yT("没有可重读的内容"), record=False)
             A11yHost.said("[重读] " + self._last)
             # 重读是玩家主动发起的，应当立刻出声 -> 显式打断
-            ok = A11yHost.speech.speak(self.REPEAT_PREFIX + self._last, True)
-            A11yHost.said_result(self.REPEAT_PREFIX + self._last, ok,
+            #
+            # ★ 只翻**前缀**，缓冲里的正文原样接在后面：正文可能是对话原文，
+            #   绝不许过本地化（1.63 / 未挂 Translate 时前缀原样）。
+            prefix = _A11yT(self.REPEAT_PREFIX)
+            ok = A11yHost.speech.speak(prefix + self._last, True)
+            A11yHost.said_result(prefix + self._last, ok,
                                  A11yHost.speech.backend_name())
             return ok
 

@@ -14,8 +14,54 @@ init -190 python:
 
     # 元信息
     A11yHost.GameName = "永恒与星辰与日常"
-    A11yHost.GameVersion = "1.63"        # 依据：scripts/options.rpy 的 config.version 实查
-    A11yHost.PatchVersion = "0.0.1.7"
+
+    # ⚠ 游戏版本：**运行期**从引擎取，不写死。
+    #
+    # 原因（0.0.2.0 的起因）：新版 1.70 在标题页加了语言切换按钮、在系统设置里
+    # 加了语言页（`setting_language`），界面控件与图片表都变了；而两份
+    # `scripts/options.rpy` 都只写 `define config.version = "1.70"` / `"1.63"`。
+    # 写死版本号会让同一份补丁在另一版上「按旧界面查表」→ 控件念错或念空。
+    # 这里留一个安全的基线默认值（老版本号的假定到处都在用，不能空），
+    # 真正的值在 init 1300 里、`validate()` **之前**由 `_a11y_detect_game_version()`
+    # 覆盖。未知版本不崩：写一条 Warning 后按 1.63 基线继续。
+    A11yHost.GameVersion = "1.63"
+    A11yHost.PatchVersion = "0.0.2.0"
+
+    #: 本补丁**正式核对过**的游戏版本；其余版本仍尽力工作，只在日志里留 Warning。
+    _A11Y_SUPPORTED_GAME_VERSIONS = ("1.63", "1.70")
+
+    def _a11y_detect_game_version():
+        """按运行期的 `config.version` 定 `A11yHost.GameVersion`。
+
+        为什么可以在这里查：`config.version` 来自 `game/scripts/options.rpy` 的
+        `define`，init 阶段已经执行过（`define` 先于同偏移的 `init python`）。
+        为什么**不在** init -190 立即查：探测结果要和「用它分流」发生在同一阶段，
+        而且任何异常都不许中断 init 链（init 链一断，按键层与播报层全部不执行 ——
+        实机事故见本文件下方与 `05_repeat.rpy` 文件头的教训）。
+
+        支持 {"1.63", "1.70"}；`1.70-demo` 这类后缀按前缀归一成 `1.70`；其余
+        版本原样保留（便于排查）并写一条 Warning —— **不崩、不静默**。
+        """
+        raw = ""
+        try:
+            raw = getattr(config, "version", "") or ""
+        except Exception:
+            raw = ""
+        ver = str(raw).strip()
+        for known in _A11Y_SUPPORTED_GAME_VERSIONS:
+            if ver == known or ver.startswith(known + "-") or ver.startswith(known + "."):
+                A11yHost.GameVersion = known
+                break
+        else:
+            if ver:
+                A11yHost.GameVersion = ver
+                A11yHost.log("Warning: 未登记的游戏版本 %r —— 按 1.63 基线继续"
+                             "（已知：%s）" % (ver, "/".join(_A11Y_SUPPORTED_GAME_VERSIONS)))
+            else:
+                A11yHost.GameVersion = "1.63"
+                A11yHost.log("Warning: 读不到 config.version —— 按 1.63 基线继续")
+        A11yHost.log("游戏版本探测: config.version=%r -> GameVersion=%s"
+                     % (raw, A11yHost.GameVersion))
 
     # 后端：空 = 自动（NVDA -> ZDSR -> SAPI(引擎同款)）。
     # ⚠ 0.0.1.6 起 ZDSR（争渡读屏）**已接入链上第三级**（旧注释写着「按维护者决定
@@ -108,7 +154,11 @@ init -190 python:
 #   而按键必须在 **init 1100 之后**（00keymap.rpy 在 1100 整体赋值 config.underlay）。
 init 1300 python:
 
-    # 0) 契约层自检（漏填写 Warning，而不是静默失效）
+    # 0) ★ 先把游戏版本按**运行期事实**定下来（1.63 / 1.70 的界面差异靠它分流）。
+    #    必须早于 `validate()`（那一行日志要报版本），也早于逐作层的其它初始化。
+    _a11y_detect_game_version()
+
+    # 0b) 契约层自检（漏填写 Warning，而不是静默失效）
     A11yHost.validate()
 
     # 1) 接管朗读出口 + 起后端链 + 登记清洗规则（逐作规则随参数传入）

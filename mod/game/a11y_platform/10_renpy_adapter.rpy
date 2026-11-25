@@ -58,6 +58,10 @@ init -50 python:
             #: 去重窗口用（见 `_drop_duplicate`）
             self._last_dialogue = ""
             self._announcing = False
+            #: 说话人解析的「已记录」缓存：源码表达式串 -> 显示名（见 `_speaker_name`）。
+            #: 只在**某个说话人第一次出现**时写一行 log，供现场取证判断
+            #: 「对话链路还活着」，不会逐句刷屏。
+            self._who_logged = {}
             #: 主菜单播报的边沿标记（见 `_menu_watch`）
             self._menu_shown = False
             #: 上一次引擎从本补丁出口送出的**文本**（见 `_tts_sink`）。
@@ -434,10 +438,15 @@ init -50 python:
             ver = A11yHost.PatchVersion or "?"
             backend = A11yHost.speech.backend_name()
 
+            # ★ 补丁自产文案：1.70 起界面语言可切英/日/繁，开屏播报也要跟着翻。
+            #   只翻**模板**（%s 占位不动），游戏名 / 版本号 / 后端名照原样代入 ——
+            #   后端名是 "NVDA"/"ZDSR" 这类标识，不该翻。
+            #   1.63 上 `Translate` 未挂 ⇒ 恒等，零行为变化。
+            name = _A11yT(name)
             if backend == "(无)":
-                msg = "%s无障碍补丁。没有可用的朗读后端，请确认读屏软件正在运行。" % name
+                msg = _A11yT("%s无障碍补丁。没有可用的朗读后端，请确认读屏软件正在运行。") % name
             else:
-                msg = "%s无障碍补丁 %s 已加载。朗读后端：%s。" % (name, ver, backend)
+                msg = _A11yT("%s无障碍补丁 %s 已加载。朗读后端：%s。") % (name, ver, backend)
             ok = A11yHost.repeat.say(msg, interrupt=True)
             # ★ 自检：**说「没有后端」却把它念出来了** ⇒ 判定取到了过期状态。
             #   这一条是实机事故的防线：开屏播报曾一边说「没有可用的朗读后端」，
@@ -602,7 +611,13 @@ init -50 python:
             #   （维护者实机反馈），按维护者要求**不再向玩家提起**它
             #   —— 键与代码留着（未查清），但不做承诺、不当卖点。
             #   （复盘见 CHANGELOG 0.0.0.7；代码在 `read_screen()`。）
-            msg = "主菜单。%s。按方向键移动，回车键确认。按 F5 重读上一句。" % "，".join(items)
+            # ★ 同样是补丁自产文案：模板与分隔符在这里过 `_A11yT`，
+            #   **选项名由逐作层在 `MainMenuItems()` 里自己过 `_A11yT`**
+            #   （1.63 上全是恒等；1.70 多出的「切换语言：X」项由 L3 直接
+            #   给出已翻好的文案，不再二次翻译）。两边各管一半 —— 平台层
+            #   不知道主菜单有哪些按钮（断言 B），拿不到中文原文就没法翻。
+            msg = _A11yT("主菜单。%s。按方向键移动，回车键确认。按 F5 重读上一句。") \
+                % _A11yT("，").join(items)
             A11yHost.said("[主菜单播报]")
             # 标记为本补丁自己的调用，否则 `_drop_duplicate` 会把它当重复压掉
             self._announcing = True
@@ -755,6 +770,20 @@ init -50 python:
             self._last_announced_what = what
 
             who = self._speaker_name()
+            # ★ 每个说话人**第一次出现**时留一行固定日志（不随 CfgDiagLog 开关）：
+            #   `说话人解析: 原始='xx_' -> 显示名='时语'` 就说明对话链路是活的；
+            #   若显示名是 '' 而原文里有名字，说明动态名求值失败 —— 该行会被
+            #   当成旁白朗读（名字丢了，但正文不会消失）。
+            #   1.70 的角色名是 lambda（dynamic=True），这一行是排查「整句不朗读」
+            #   时最快的现场证据，所以用 always-on 的 log 而不是 diag。
+            try:
+                _raw = getattr(store, "_last_say_who", None)
+                _key = _raw if isinstance(_raw, str) else repr(_raw)
+                if _key not in self._who_logged:
+                    self._who_logged[_key] = who
+                    A11yHost.log("说话人解析: 原始=%r -> 显示名=%r" % (_raw, who))
+            except Exception:
+                pass
             try:
                 self.announce_dialogue(who, what)
             except Exception:
@@ -779,11 +808,43 @@ init -50 python:
                 if isinstance(w, str):
                     obj = getattr(store, w, None)
                     if obj is not None:
-                        return getattr(obj, "name", "") or ""
+                        return self._resolve_name(getattr(obj, "name", ""))
                     return w
-                return getattr(w, "name", "") or ""
+                return self._resolve_name(getattr(w, "name", ""))
             except Exception:
                 return ""
+
+        @staticmethod
+        def _resolve_name(name):
+            """把 `Character.name` 收成**字符串显示名**。
+
+            ★ 为什么必须收：1.70 的角色是
+
+                Character(lambda: l10n_text("…"), dynamic=True)
+
+            `renpy/character.py:1051` 执行 `self.name = v("name")` 时
+            **把 callable 原样存进 `.name`**，引擎自己只在
+            `renpy/character.py:1538-1544` 判 `self.dynamic` 时才去调它。
+            平台层如果不调，`_speaker_name()` 返回的就是**函数对象**，
+            下游 `announce_dialogue` 里 `who.strip()` 抛 `AttributeError`，
+            被 `_flush_dialogue` 的 except 吞成「对话朗读异常」
+            ⇒ **每一句有角色名的台词都不朗读**（旁白没有 who，反而正常，
+            所以这个故障会被掩盖）。
+
+            只对 callable 调用 ⇒ 1.63 的字符串名零影响。
+            动态名求值失败、或结果不是字符串时返回空串（该行按旁白朗读，
+            宁可多念名字之外的内容，也不许整句消失）。
+            """
+            if callable(name):
+                try:
+                    name = name()
+                except Exception:
+                    return ""
+            if name is None:
+                return ""
+            if not isinstance(name, str):
+                return ""
+            return name
 
         @staticmethod
         def _line_has_voice():
@@ -872,6 +933,17 @@ init -50 python:
             """
             if not what:
                 return
+            # 防御：`who` 到这里必须是**字符串**。1.70 的动态角色名曾以函数对象
+            # 流进来，让下游 `who.strip()` 抛 AttributeError、整句台词被 except
+            # 吞掉（见 `_resolve_name` 的说明）。这里再兜一层：任何非字符串
+            # 都尝试收成显示名，收不出来就当旁白（名字丢了，正文仍在）。
+            if who is None:
+                who = ""
+            elif not isinstance(who, str):
+                try:
+                    who = self._resolve_name(getattr(who, "name", ""))
+                except Exception:
+                    who = ""
             text = self._clean_for_speech(what)
 
             has_speaker = bool(who and who.strip())

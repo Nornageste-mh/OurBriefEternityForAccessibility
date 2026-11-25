@@ -32,6 +32,20 @@ if hasattr(sys.stdout, "reconfigure"):
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEF_SCRIPTS = os.path.join(REPO, "extracted", "scripts", "scripts")
 
+
+def _rel(p):
+    """尽量显示成相对仓库的路径。
+
+    ⚠ 跨盘符时 `os.path.relpath` 会抛 `ValueError: path is on mount 'D:',
+    start on mount 'C:'` —— 而「仓库在 C:、游戏装在 D:」正是常见情形
+    （本机就是 D:\\Steam\\...）。这里退化成绝对路径，不让核对脚本崩。
+    """
+    try:
+        return os.path.relpath(p, REPO)
+    except ValueError:
+        return p
+
+
 #: (名字, 它撑起什么, 期望最先出现在哪个文件里 —— 只用于提示)
 NEEDED = [
     ("persistent._file_page", "存读档槽位名的页号（`FilePage` 会改它）", "00action_file"),
@@ -70,7 +84,7 @@ def main():
 
     print("=" * 72)
     print("游戏侧名字核对")
-    print(f"脚本目录: {os.path.relpath(args.scripts, REPO)}")
+    print(f"脚本目录: {_rel(args.scripts)}")
     print("=" * 72)
 
     blobs = {}
@@ -92,7 +106,7 @@ def main():
         hit = None
         for p, t in blobs.items():
             if pat.search(t):
-                hit = os.path.relpath(p, REPO)
+                hit = _rel(p)
                 break
         if hit:
             print(f"  OK   {name:28s} {why}")
